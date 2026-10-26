@@ -1,0 +1,71 @@
+# main: deploy to staging -> integration tests on staging data -> MANUAL APPROVAL -> deploy to prod.
+# Approval gate: the `approve` job opens an issue and waits for an approver to comment "approve"
+# (or "deny"). GitHub's built-in environment "required reviewers" is not available for private repos
+# on the Free plan; on Pro/Team/Enterprise, delete the approve job and add reviewers to the "prod"
+# environment instead. The "prod" environment already restricts deploys to the main branch.
+# Deploy code, not models: each environment trains its own models on its own data after deploy.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false # never cancel a half-finished prod deploy
+
+permissions:
+  contents: read
+
+# Databricks OAuth M2M as the CI service principal (sp-pos-cicd). PROD: use GitHub OIDC workload
+# identity federation instead (no stored secret; needs an account-level federation policy, which
+# Free Edition does not expose). Set up by scripts/setup_ci.sh.
+env:
+  DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+  DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+  DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+
+jobs:
+  staging:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - uses: databricks/setup-cli@v1.22.1
+      - run: uv sync --frozen
+      - name: Deploy to staging
+        run: databricks bundle deploy -t staging
+      - name: Integration tests on staging (fixture data -> pipeline -> assertions)
+        run: uv run pytest -q -m integration tests/integration --env staging
+
+  approve:
+    needs: staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for an approver's "approve" comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPROVERS: ${{ vars.PROD_APPROVERS || github.repository_owner }}
+          APPROVAL_TIMEOUT_MIN: "60"
+        run: bash .github/scripts/wait_for_approval.sh
+
+  prod:
+    needs: approve
+    runs-on: ubuntu-latest
+    environment: prod # branch policy: main only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@v1.22.1
+      - name: Deploy to prod
+        run: databricks bundle deploy -t prod
+      - name: Smoke test prod (pipelines exist, last refresh healthy)
+        run: databricks bundle summary -t prod

@@ -1,0 +1,55 @@
+# Asset bundle skeleton (proven on Free Edition + CI). Gotchas baked in:
+# - no `workspace.profile` in targets: locally the DEFAULT profile, in CI DATABRICKS_HOST/CLIENT_ID/SECRET
+# - staging/prod root_path under the deploying principal's home (not /Workspace/Shared)
+# - an explicit pause_status overrides dev mode's auto-pause: dev schedules RUN unless you pass PAUSED
+# - one job per *.job.yml file (the CLI nags otherwise); alert display names cannot contain '/'
+# - run_job_task children inherit the PARENT job's parameters, which override same-named job_parameters
+bundle:
+  name: my-lakehouse # TODO
+
+include:
+  - resources/*.yml
+
+variables:
+  env: {description: UC schema prefix}
+  warehouse_id:
+    lookup: {warehouse: Serverless Starter Warehouse}
+  pause_status: {default: UNPAUSED}
+  alert_email: {default: "${workspace.current_user.userName}"}
+
+targets:
+  dev:
+    default: true
+    mode: development
+    variables: {env: dev}
+    presets: {tags: {env: dev}}
+  staging:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/staging
+    variables: {env: staging, pause_status: PAUSED}
+    presets: {tags: {env: staging}}
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/prod
+    variables: {env: prod, pause_status: PAUSED}
+    presets: {tags: {env: prod}}
+
+# resources/pipeline.yml (one per pipeline):
+# resources:
+#   pipelines:
+#     main:
+#       name: my-medallion-${var.env}
+#       catalog: my_catalog
+#       schema: ${var.env}_silver
+#       serverless: true
+#       continuous: false
+#       root_path: ../pipelines/main            # makes pipelines/main/<pkg> importable
+#       libraries: [{glob: {include: ../pipelines/main/transformations/**}}]
+#       configuration:
+#         app.catalog: my_catalog
+#         app.env: ${var.env}
+#         app.landing_path: /Volumes/my_catalog/${var.env}_bronze/landing/raw
+#         spark.sql.session.timeZone: UTC
+#       tags: {component: medallion, cost_center: my-team}
