@@ -1,0 +1,775 @@
+{
+ "datasets": [
+  {
+   "name": "ds_recent",
+   "displayName": "Last 4 full weeks",
+   "queryLines": [
+    "SELECT store_id, product_name, category, units_sold, days_in_stock, period_days, stockout_days, waste_units, waste_value\n",
+    "FROM workspace.grocery_reorder.gold_store_product_week WHERE week_num > (SELECT max(week_num) FROM workspace.grocery_reorder.gold_store_product_week WHERE NOT is_partial_week) - 4\n",
+    "  AND NOT is_partial_week\n"
+   ]
+  },
+  {
+   "name": "ds_stockouts",
+   "displayName": "Top stockout items (last 4 weeks)",
+   "queryLines": [
+    "SELECT store_id, product_name, category, sum(stockout_days) AS stockout_days,\n",
+    "  round(sum(days_in_stock) / sum(period_days), 3) AS availability,\n",
+    "  round(sum(est_demand) - sum(units_sold)) AS lost_units\n",
+    "FROM workspace.grocery_reorder.gold_store_product_week WHERE week_num > (SELECT max(week_num) FROM workspace.grocery_reorder.gold_store_product_week WHERE NOT is_partial_week) - 4\n",
+    "  AND NOT is_partial_week\n",
+    "GROUP BY ALL HAVING sum(stockout_days) > 0 ORDER BY stockout_days DESC\n"
+   ]
+  },
+  {
+   "name": "ds_waste",
+   "displayName": "Top waste items (last 4 weeks)",
+   "queryLines": [
+    "SELECT store_id, product_name, category, sum(waste_units) AS waste_units, round(sum(waste_value), 2) AS waste_usd,\n",
+    "  round(sum(waste_units) / nullif(sum(received), 0), 3) AS waste_share_of_received\n",
+    "FROM workspace.grocery_reorder.gold_store_product_week WHERE week_num > (SELECT max(week_num) FROM workspace.grocery_reorder.gold_store_product_week WHERE NOT is_partial_week) - 4\n",
+    "  AND NOT is_partial_week\n",
+    "GROUP BY ALL HAVING sum(waste_units) > 0 ORDER BY waste_usd DESC\n"
+   ]
+  },
+  {
+   "name": "ds_reorder",
+   "displayName": "Next week's reorder list",
+   "queryLines": [
+    "SELECT store_id, product_name, category, round(forecast_units) AS forecast, on_hand, on_order, case_pack,\n",
+    "  order_cases, order_units, order_value, reason\n",
+    "FROM workspace.grocery_reorder.gold_reorder_recommendation WHERE order_units > 0 ORDER BY store_id, order_value DESC\n"
+   ]
+  },
+  {
+   "name": "ds_trend",
+   "displayName": "Weekly trend",
+   "queryLines": [
+    "SELECT store_id, week_start, sum(days_in_stock) AS days_in_stock, sum(period_days) AS period_days,\n",
+    "  sum(waste_value) AS waste_value, sum(revenue) AS revenue\n",
+    "FROM workspace.grocery_reorder.gold_store_product_week WHERE NOT is_partial_week GROUP BY ALL\n"
+   ]
+  }
+ ],
+ "pages": [
+  {
+   "name": "store",
+   "displayName": "Store manager",
+   "pageType": "PAGE_TYPE_CANVAS",
+   "layoutVersion": "GRID_V1",
+   "layout": [
+    {
+     "widget": {
+      "name": "title",
+      "multilineTextboxSpec": {
+       "lines": [
+        "## Store manager: availability, waste and next week's orders\n"
+       ]
+      }
+     },
+     "position": {
+      "x": 0,
+      "y": 0,
+      "width": 12,
+      "height": 1
+     }
+    },
+    {
+     "widget": {
+      "name": "subtitle",
+      "multilineTextboxSpec": {
+       "lines": [
+        "Counters and top lists cover the last 4 full weeks. Reorder = forecast + safety stock \u2212 stock at arrival \u2212 on order, in whole cases; perishables capped at what sells within shelf life.\n"
+       ]
+      }
+     },
+     "position": {
+      "x": 0,
+      "y": 1,
+      "width": 12,
+      "height": 1
+     }
+    },
+    {
+     "widget": {
+      "name": "filter_store",
+      "queries": [
+       {
+        "name": "ds_recent_store_id",
+        "query": {
+         "datasetName": "ds_recent",
+         "fields": [
+          {
+           "name": "store_id",
+           "expression": "`store_id`"
+          }
+         ],
+         "disaggregated": false
+        }
+       },
+       {
+        "name": "ds_stockouts_store_id",
+        "query": {
+         "datasetName": "ds_stockouts",
+         "fields": [
+          {
+           "name": "store_id",
+           "expression": "`store_id`"
+          }
+         ],
+         "disaggregated": false
+        }
+       },
+       {
+        "name": "ds_waste_store_id",
+        "query": {
+         "datasetName": "ds_waste",
+         "fields": [
+          {
+           "name": "store_id",
+           "expression": "`store_id`"
+          }
+         ],
+         "disaggregated": false
+        }
+       },
+       {
+        "name": "ds_reorder_store_id",
+        "query": {
+         "datasetName": "ds_reorder",
+         "fields": [
+          {
+           "name": "store_id",
+           "expression": "`store_id`"
+          }
+         ],
+         "disaggregated": false
+        }
+       },
+       {
+        "name": "ds_trend_store_id",
+        "query": {
+         "datasetName": "ds_trend",
+         "fields": [
+          {
+           "name": "store_id",
+           "expression": "`store_id`"
+          }
+         ],
+         "disaggregated": false
+        }
+       }
+      ],
+      "spec": {
+       "version": 2,
+       "widgetType": "filter-multi-select",
+       "encodings": {
+        "fields": [
+         {
+          "fieldName": "store_id",
+          "displayName": "Store",
+          "queryName": "ds_recent_store_id"
+         },
+         {
+          "fieldName": "store_id",
+          "displayName": "Store",
+          "queryName": "ds_stockouts_store_id"
+         },
+         {
+          "fieldName": "store_id",
+          "displayName": "Store",
+          "queryName": "ds_waste_store_id"
+         },
+         {
+          "fieldName": "store_id",
+          "displayName": "Store",
+          "queryName": "ds_reorder_store_id"
+         },
+         {
+          "fieldName": "store_id",
+          "displayName": "Store",
+          "queryName": "ds_trend_store_id"
+         }
+        ]
+       },
+       "frame": {
+        "showTitle": true,
+        "title": "Store"
+       }
+      }
+     },
+     "position": {
+      "x": 0,
+      "y": 2,
+      "width": 12,
+      "height": 2
+     }
+    },
+    {
+     "widget": {
+      "name": "kpi_avail",
+      "queries": [
+       {
+        "name": "main_query",
+        "query": {
+         "datasetName": "ds_recent",
+         "fields": [
+          {
+           "name": "availability",
+           "expression": "SUM(`days_in_stock`) / SUM(`period_days`)"
+          }
+         ],
+         "disaggregated": false
+        }
+       }
+      ],
+      "spec": {
+       "version": 2,
+       "widgetType": "counter",
+       "encodings": {
+        "value": {
+         "fieldName": "availability",
+         "displayName": "Availability % (in-stock days)",
+         "format": {
+          "type": "number-percent",
+          "decimalPlaces": {
+           "type": "max",
+           "places": 1
+          }
+         }
+        }
+       },
+       "frame": {
+        "showTitle": true,
+        "title": "Availability % (in-stock days)"
+       }
+      }
+     },
+     "position": {
+      "x": 0,
+      "y": 4,
+      "width": 4,
+      "height": 3
+     }
+    },
+    {
+     "widget": {
+      "name": "kpi_waste",
+      "queries": [
+       {
+        "name": "main_query",
+        "query": {
+         "datasetName": "ds_recent",
+         "fields": [
+          {
+           "name": "sum(waste_value)",
+           "expression": "SUM(`waste_value`)"
+          }
+         ],
+         "disaggregated": false
+        }
+       }
+      ],
+      "spec": {
+       "version": 2,
+       "widgetType": "counter",
+       "encodings": {
+        "value": {
+         "fieldName": "sum(waste_value)",
+         "displayName": "Waste $ (at cost)",
+         "format": {
+          "type": "number-currency",
+          "currencyCode": "USD",
+          "abbreviation": "compact",
+          "decimalPlaces": {
+           "type": "max",
+           "places": 1
+          }
+         }
+        }
+       },
+       "frame": {
+        "showTitle": true,
+        "title": "Waste $ (at cost)"
+       }
+      }
+     },
+     "position": {
+      "x": 4,
+      "y": 4,
+      "width": 4,
+      "height": 3
+     }
+    },
+    {
+     "widget": {
+      "name": "kpi_stockout",
+      "queries": [
+       {
+        "name": "main_query",
+        "query": {
+         "datasetName": "ds_recent",
+         "fields": [
+          {
+           "name": "sum(stockout_days)",
+           "expression": "SUM(`stockout_days`)"
+          }
+         ],
+         "disaggregated": false
+        }
+       }
+      ],
+      "spec": {
+       "version": 2,
+       "widgetType": "counter",
+       "encodings": {
+        "value": {
+         "fieldName": "sum(stockout_days)",
+         "displayName": "Stockout days",
+         "format": {
+          "type": "number",
+          "abbreviation": "compact",
+          "decimalPlaces": {
+           "type": "max",
+           "places": 1
+          }
+         }
+        }
+       },
+       "frame": {
+        "showTitle": true,
+        "title": "Stockout days"
+       }
+      }
+     },
+     "position": {
+      "x": 8,
+      "y": 4,
+      "width": 4,
+      "height": 3
+     }
+    },
+    {
+     "widget": {
+      "name": "tbl_stockouts",
+      "queries": [
+       {
+        "name": "main_query",
+        "query": {
+         "datasetName": "ds_stockouts",
+         "fields": [
+          {
+           "name": "store_id",
+           "expression": "`store_id`"
+          },
+          {
+           "name": "product_name",
+           "expression": "`product_name`"
+          },
+          {
+           "name": "stockout_days",
+           "expression": "`stockout_days`"
+          },
+          {
+           "name": "availability",
+           "expression": "`availability`"
+          },
+          {
+           "name": "lost_units",
+           "expression": "`lost_units`"
+          }
+         ],
+         "disaggregated": true
+        }
+       }
+      ],
+      "spec": {
+       "version": 2,
+       "widgetType": "table",
+       "encodings": {
+        "columns": [
+         {
+          "fieldName": "store_id",
+          "displayName": "Store"
+         },
+         {
+          "fieldName": "product_name",
+          "displayName": "Product"
+         },
+         {
+          "fieldName": "stockout_days",
+          "displayName": "Stockout days"
+         },
+         {
+          "fieldName": "availability",
+          "displayName": "Availability"
+         },
+         {
+          "fieldName": "lost_units",
+          "displayName": "Lost units (est.)"
+         }
+        ]
+       },
+       "frame": {
+        "showTitle": true,
+        "title": "Top stockout items"
+       }
+      }
+     },
+     "position": {
+      "x": 0,
+      "y": 7,
+      "width": 6,
+      "height": 7
+     }
+    },
+    {
+     "widget": {
+      "name": "tbl_waste",
+      "queries": [
+       {
+        "name": "main_query",
+        "query": {
+         "datasetName": "ds_waste",
+         "fields": [
+          {
+           "name": "store_id",
+           "expression": "`store_id`"
+          },
+          {
+           "name": "product_name",
+           "expression": "`product_name`"
+          },
+          {
+           "name": "waste_units",
+           "expression": "`waste_units`"
+          },
+          {
+           "name": "waste_usd",
+           "expression": "`waste_usd`"
+          },
+          {
+           "name": "waste_share_of_received",
+           "expression": "`waste_share_of_received`"
+          }
+         ],
+         "disaggregated": true
+        }
+       }
+      ],
+      "spec": {
+       "version": 2,
+       "widgetType": "table",
+       "encodings": {
+        "columns": [
+         {
+          "fieldName": "store_id",
+          "displayName": "Store"
+         },
+         {
+          "fieldName": "product_name",
+          "displayName": "Product"
+         },
+         {
+          "fieldName": "waste_units",
+          "displayName": "Waste units"
+         },
+         {
+          "fieldName": "waste_usd",
+          "displayName": "Waste $"
+         },
+         {
+          "fieldName": "waste_share_of_received",
+          "displayName": "Share of received"
+         }
+        ]
+       },
+       "frame": {
+        "showTitle": true,
+        "title": "Top waste items"
+       }
+      }
+     },
+     "position": {
+      "x": 6,
+      "y": 7,
+      "width": 6,
+      "height": 7
+     }
+    },
+    {
+     "widget": {
+      "name": "tbl_reorder",
+      "queries": [
+       {
+        "name": "main_query",
+        "query": {
+         "datasetName": "ds_reorder",
+         "fields": [
+          {
+           "name": "store_id",
+           "expression": "`store_id`"
+          },
+          {
+           "name": "product_name",
+           "expression": "`product_name`"
+          },
+          {
+           "name": "forecast",
+           "expression": "`forecast`"
+          },
+          {
+           "name": "on_hand",
+           "expression": "`on_hand`"
+          },
+          {
+           "name": "on_order",
+           "expression": "`on_order`"
+          },
+          {
+           "name": "case_pack",
+           "expression": "`case_pack`"
+          },
+          {
+           "name": "order_cases",
+           "expression": "`order_cases`"
+          },
+          {
+           "name": "order_units",
+           "expression": "`order_units`"
+          },
+          {
+           "name": "order_value",
+           "expression": "`order_value`"
+          },
+          {
+           "name": "reason",
+           "expression": "`reason`"
+          }
+         ],
+         "disaggregated": true
+        }
+       }
+      ],
+      "spec": {
+       "version": 2,
+       "widgetType": "table",
+       "encodings": {
+        "columns": [
+         {
+          "fieldName": "store_id",
+          "displayName": "Store"
+         },
+         {
+          "fieldName": "product_name",
+          "displayName": "Product"
+         },
+         {
+          "fieldName": "forecast",
+          "displayName": "Forecast"
+         },
+         {
+          "fieldName": "on_hand",
+          "displayName": "On hand"
+         },
+         {
+          "fieldName": "on_order",
+          "displayName": "On order"
+         },
+         {
+          "fieldName": "case_pack",
+          "displayName": "Case pack"
+         },
+         {
+          "fieldName": "order_cases",
+          "displayName": "Cases"
+         },
+         {
+          "fieldName": "order_units",
+          "displayName": "Units"
+         },
+         {
+          "fieldName": "order_value",
+          "displayName": "Value $"
+         },
+         {
+          "fieldName": "reason",
+          "displayName": "Reason"
+         }
+        ]
+       },
+       "frame": {
+        "showTitle": true,
+        "title": "Next week's reorder list"
+       }
+      }
+     },
+     "position": {
+      "x": 0,
+      "y": 14,
+      "width": 12,
+      "height": 8
+     }
+    },
+    {
+     "widget": {
+      "name": "ln_avail",
+      "queries": [
+       {
+        "name": "main_query",
+        "query": {
+         "datasetName": "ds_trend",
+         "fields": [
+          {
+           "name": "week_start",
+           "expression": "`week_start`"
+          },
+          {
+           "name": "availability",
+           "expression": "SUM(`days_in_stock`) / SUM(`period_days`)"
+          }
+         ],
+         "disaggregated": false
+        }
+       }
+      ],
+      "spec": {
+       "version": 3,
+       "widgetType": "line",
+       "encodings": {
+        "x": {
+         "fieldName": "week_start",
+         "scale": {
+          "type": "temporal"
+         },
+         "displayName": "week_start"
+        },
+        "y": {
+         "fieldName": "availability",
+         "displayName": "Availability",
+         "scale": {
+          "type": "quantitative"
+         },
+         "format": {
+          "type": "number-percent",
+          "decimalPlaces": {
+           "type": "max",
+           "places": 1
+          }
+         }
+        }
+       },
+       "frame": {
+        "showTitle": true,
+        "title": "Weekly availability %"
+       }
+      }
+     },
+     "position": {
+      "x": 0,
+      "y": 22,
+      "width": 6,
+      "height": 6
+     }
+    },
+    {
+     "widget": {
+      "name": "bar_waste",
+      "queries": [
+       {
+        "name": "main_query",
+        "query": {
+         "datasetName": "ds_trend",
+         "fields": [
+          {
+           "name": "week_start",
+           "expression": "`week_start`"
+          },
+          {
+           "name": "sum(waste_value)",
+           "expression": "SUM(`waste_value`)"
+          }
+         ],
+         "disaggregated": false
+        }
+       }
+      ],
+      "spec": {
+       "version": 3,
+       "widgetType": "bar",
+       "encodings": {
+        "x": {
+         "fieldName": "week_start",
+         "scale": {
+          "type": "temporal"
+         },
+         "displayName": "week_start"
+        },
+        "y": {
+         "fieldName": "sum(waste_value)",
+         "displayName": "Waste $",
+         "scale": {
+          "type": "quantitative"
+         },
+         "format": {
+          "type": "number-currency",
+          "currencyCode": "USD",
+          "abbreviation": "compact",
+          "decimalPlaces": {
+           "type": "max",
+           "places": 1
+          }
+         }
+        }
+       },
+       "frame": {
+        "showTitle": true,
+        "title": "Weekly waste $"
+       }
+      }
+     },
+     "position": {
+      "x": 6,
+      "y": 22,
+      "width": 6,
+      "height": 6
+     }
+    }
+   ]
+  }
+ ],
+ "uiSettings": {
+  "theme": {
+   "canvasBackgroundColor": {
+    "light": "#F7F9FA",
+    "dark": "#1F272D"
+   },
+   "widgetBackgroundColor": {
+    "light": "#FFFFFF",
+    "dark": "#11171C"
+   },
+   "widgetBorderColor": {
+    "light": "#FFFFFF",
+    "dark": "#11171C"
+   },
+   "fontColor": {
+    "light": "#11171C",
+    "dark": "#E8ECF0"
+   },
+   "selectionColor": {
+    "light": "#2272B4",
+    "dark": "#8ACAFF"
+   },
+   "visualizationColors": [
+    "#0072B2",
+    "#E69F00",
+    "#009E73",
+    "#CC79A7",
+    "#56B4E9",
+    "#D55E00",
+    "#999999"
+   ],
+   "widgetHeaderAlignment": "LEFT"
+  }
+ }
+}
