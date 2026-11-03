@@ -463,8 +463,13 @@ reorder_out = reorder.assign(week_start=week_start_next)[
     ["store_id", "item_id", "product_name", "category", "perishable", "week_start", "forecast_method", "forecast_units",
      "safety_stock", "on_hand", "on_order", "on_hand_at_arrival", "case_pack", "shelf_life_days", "shelf_life_cap",
      "order_units", "order_cases", "order_value", "capped_by_shelf_life", "recent_availability", "reason"]].round(2)
-spark.createDataFrame(forecast_out).write.mode("overwrite").option("overwriteSchema", True).saveAsTable("gold_demand_forecast")
-spark.createDataFrame(reorder_out).write.mode("overwrite").option("overwriteSchema", True).saveAsTable("gold_reorder_recommendation")
+# SPARK: join back to gold_store_product_week in Spark (adds store name and region) so Unity Catalog lineage links these
+# tables to their sources; a plain pandas -> createDataFrame write would show only the notebook as upstream
+store_context = (spark.table("gold_store_product_week").where(F.col("week_num") == current_week)
+                 .select("store_id", "item_id", "store_name", "region"))
+for out, table in [(forecast_out, "gold_demand_forecast"), (reorder_out, "gold_reorder_recommendation")]:
+    (spark.createDataFrame(out).join(store_context, ["store_id", "item_id"], "left")
+     .write.mode("overwrite").option("overwriteSchema", True).saveAsTable(table))
 
 # COMMAND ----------
 
