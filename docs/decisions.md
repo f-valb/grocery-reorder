@@ -15,3 +15,10 @@
 - Backtest replays the recommendation against estimated demand, assuming the supplier fills the full order (the popular items are supplier-constrained, so their stockout gain is an upper bound). The simulated expiry rule is stricter than reality for long-life perishables, so their simulated waste is a high estimate.
 - Promo weeks are excluded from the baseline and from the backtest comparison; a production system would add the planned promo lift on top.
 - Dashboard built from the kit's widget helpers and deployed with the CLI (lakeview create/update + publish) from `dashboards/build_dashboard.py`; tables instead of top-N bar charts because they stay readable with the store filter.
+
+## v2 (branch multi-source-ml, schema grocery_intel)
+- Three mocked source systems instead of one generator output: Postgres POS, MySQL ERP, SaaS store-ops + promo tool. Real ingestion is not wired up (Lakeflow Connect / SaaS connector in production); the raw extracts land as parquet per source table.
+- Core entity: store-item. The ERP is the key master (it holds the POS ids and store names), so silver can map every source onto it.
+- Flaws are extra corrupted copies of true rows (later `updated_at`), never edits, and quality rules run before dedupe so a corrupted copy can't win.
+- Bronze reads every extract with an explicit schema; SaaS fields stay text and are parsed in silver, where misfits are quarantined.
+- Spike rule for one-off events: residual from the store-item's trend line above median + 3.5 × max(1.4826 × MAD, √mean). Robust stats, because the spike itself would inflate a standard deviation. Locally it flags all 7 festival rows plus 2 others.

@@ -25,7 +25,9 @@ for stmt in sys.argv[1:]:
     d = json.loads(out.stdout or "{}")
     if d.get("status", {}).get("state") != "SUCCEEDED":
         print(stmt, "\n ->", d.get("status", out.stderr)); continue
-    cols = [c["name"] for c in d["manifest"]["schema"]["columns"]]
+    cols = [c["name"] for c in d.get("manifest", {}).get("schema", {}).get("columns", [])]
+    if not cols:  # DROP / ALTER / COMMENT return no result set
+        print(stmt.split()[0].upper(), "OK\n"); continue
     rows = d.get("result", {}).get("data_array", [])
     w = [max(len(str(x)) for x in [c] + [r[i] for r in rows]) for i, c in enumerate(cols)]
     print(" | ".join(c.ljust(w[i]) for i, c in enumerate(cols)))
