@@ -1,14 +1,15 @@
 """Create or update the two Databricks Apps, upload their code and deploy them.
 
-    DATABRICKS_CONFIG_PROFILE=food python3 apps/deploy_apps.py            # stage, create/update, start, deploy both
-    DATABRICKS_CONFIG_PROFILE=food python3 apps/deploy_apps.py --stage    # only copy apps/common into each app (local run)
-    DATABRICKS_CONFIG_PROFILE=food python3 apps/deploy_apps.py --stop     # stop both apps (they use credits while running)
+    DATABRICKS_CONFIG_PROFILE=food WAREHOUSE_ID=5d7ed27d256c7dcf python3 apps/deploy_apps.py            # stage, create/update, start, deploy both
+    DATABRICKS_CONFIG_PROFILE=food WAREHOUSE_ID=5d7ed27d256c7dcf python3 apps/deploy_apps.py --stage    # only copy apps/common into each app (local run)
+    DATABRICKS_CONFIG_PROFILE=food WAREHOUSE_ID=5d7ed27d256c7dcf python3 apps/deploy_apps.py --stop     # stop both apps (they use credits while running)
 
 Each app gets user authorization scopes, so it runs SQL, Genie and the model endpoint as the signed-in viewer
 (Unity Catalog row filter and column mask apply per viewer), plus resources for its service principal.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -17,8 +18,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-WAREHOUSE_ID = "5d7ed27d256c7dcf"
-GENIE_SPACE_ID = (ROOT / "genie" / "space_id.txt").read_text().strip()
+PROFILE = os.environ.get("DATABRICKS_CONFIG_PROFILE", "DEFAULT")
+WAREHOUSE_ID = os.environ["WAREHOUSE_ID"]  # the workspace's SQL warehouse
+GENIE_SPACE_ID = (ROOT / "genie" / f"space_id.{PROFILE}.txt").read_text().strip()  # build the Genie space first
 LLM = "databricks-meta-llama-3-3-70b-instruct"
 WAREHOUSE = {"name": "sql-warehouse", "sql_warehouse": {"id": WAREHOUSE_ID, "permission": "CAN_USE"}}
 APPS = {
@@ -51,10 +53,16 @@ def stage():
         shutil.copy(HERE / "common" / "grocery_data.py", HERE / spec["folder"] / "grocery_data.py")
 
 
-def wait_compute(name, wanted="ACTIVE"):
-    while (state := cli("apps", "get", name)["compute_status"]["state"]) not in (wanted, "ERROR"):
+def wait_compute(name, wanted="ACTIVE", minutes=15):
+    # TRAP: a first start on a new workspace can drop back to STOPPED without an error: start it again, with a deadline
+    for _ in range(minutes * 4):
+        state = cli("apps", "get", name)["compute_status"]["state"]
+        if state in (wanted, "ERROR"):
+            return state
+        if state == "STOPPED":
+            cli("apps", "start", name, "--no-wait", check=False)
         time.sleep(15)
-    return state
+    raise SystemExit(f"{name}: compute not {wanted} after {minutes} minutes")
 
 
 def deploy(name, spec, user):

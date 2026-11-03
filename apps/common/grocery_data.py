@@ -15,7 +15,7 @@ from databricks import sql
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
 
-WAREHOUSE_ID = os.environ.get("WAREHOUSE_ID", "5d7ed27d256c7dcf")
+WAREHOUSE_ID = os.environ["WAREHOUSE_ID"]  # app.yaml: from the sql-warehouse resource; locally: export it
 SCHEMA = "workspace.grocery_intel"
 
 

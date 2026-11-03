@@ -3,7 +3,7 @@
     DATABRICKS_CONFIG_PROFILE=food WAREHOUSE_ID=5d7ed27d256c7dcf python3 dashboards/build_dashboard.py
 
 Widget helpers come from templates/dashboards/build_dashboards.py. The dashboard id is kept in
-dashboards/dashboard_id_intel.txt so reruns update the same dashboard (v1 keeps dashboard_id.txt). Prints the dashboard URL.
+dashboards/dashboard_id_intel.<profile>.txt so reruns update the same dashboard (v1 keeps dashboard_id.txt). Prints the dashboard URL.
 """
 
 import importlib.util
@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+PROFILE = os.environ.get("DATABRICKS_CONFIG_PROFILE", "DEFAULT")  # ids are saved per workspace profile
 spec = importlib.util.spec_from_file_location("kit", HERE.parent / "templates/dashboards/build_dashboards.py")
 kit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(kit)
@@ -122,7 +123,7 @@ if __name__ == "__main__":
     user = cli("current-user", "me")["userName"]
     payload = {"display_name": "Grocery intelligence: stock, waste, forecast, reorder", "warehouse_id": warehouse,
                "serialized_dashboard": json.dumps(body), "parent_path": f"/Users/{user}/{HERE.parent.name}"}
-    id_file = HERE / "dashboard_id_intel.txt"
+    id_file = HERE / f"dashboard_id_intel.{PROFILE}.txt"
     if id_file.exists():
         dash = cli("lakeview", "update", id_file.read_text().strip(), "--json", json.dumps(payload))
     else:

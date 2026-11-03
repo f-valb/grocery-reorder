@@ -1,13 +1,13 @@
 # Demo flow: Genie + documents → dashboard → lineage (about 16 minutes)
 
-Workspace: https://dbc-0a174280-b54a.cloud.databricks.com/?o=7474648703926670 · schema `workspace.grocery_intel`
+Workspace: https://dbc-ce80c680-bd6d.cloud.databricks.com/?o=7474657261879907 · schema `workspace.grocery_intel`
 
 **Story in one line:** three systems that never agreed (POS, ERP, store-ops app) now feed one governed store-item data product; a trained forecast sits on top; managers ask questions in plain English, see the predictions in a dashboard, and can trace every number back to its source.
 
 ---
 
 ## 1. Genie: ask the existing data in plain English (5 min)
-Open **Grocery store assistant**: https://dbc-0a174280-b54a.cloud.databricks.com/genie/rooms/01f1d74831d813fe87330e09c853ca47
+Open **Grocery store assistant**: https://dbc-ce80c680-bd6d.cloud.databricks.com/genie/rooms/01f1d782092017d2b9f29e3b41dd9d0e
 
 Before typing, say: Genie only sees the governed gold tables, plus our business definitions (what "availability", "waste rate" and "last 4 weeks" mean). It writes SQL, and that SQL runs as the person asking, so the store row filter applies here too.
 
@@ -72,7 +72,7 @@ Talking point: the documents are governed like the tables (volume, Delta tables 
 ---
 
 ## 2. Reports and dashboard, including predictions (4 min)
-Open **Grocery intelligence**: https://dbc-0a174280-b54a.cloud.databricks.com/dashboardsv3/01f1d72d64ab1c8b92f78b4c747b325a/published
+Open **Grocery intelligence**: https://dbc-ce80c680-bd6d.cloud.databricks.com/dashboardsv3/01f1d7820654139fa1fadd11efe72fc1/published
 
 1. **All stores first:** availability 97.6% and waste $35.6k (last 4 weeks), top stockout and waste items, weekly trends.
 2. **Store filter → ST-07:** the waste counter and tables change; the reorder list shows next week's quantities with the reason column.
@@ -88,12 +88,13 @@ Talking point: the dashboard is published without embedded credentials, so a sto
 ---
 
 ## 2b. The pipeline as a job (1 min)
-**Jobs & Pipelines** → *Grocery intelligence: sources to forecast, reorder and documents* (https://dbc-0a174280-b54a.cloud.databricks.com/jobs/921270369760005).
-- **Tasks** tab: the graph ingest_sources → bronze_silver_pipeline → gold_forecast_model → demo_checks + documents_vector_index; each task has a one-line description. `bronze_silver_pipeline` is a pipeline task: click it → **View pipeline**.
-- **The pipeline** (*Grocery sources: POS, ERP and SaaS extracts to bronze and silver*): the graph shows the 6 source extracts → bronze → silver, plus `silver_quarantine` and `silver_quality_log`. Click a `*_checked` node → **Data quality**: rows failing each named rule (unknown store or item, negative stock, waste above available stock). Say: the pipeline declares *what* each table is; Databricks works out the order, retries and lineage.
+**Jobs & Pipelines** → *Grocery intelligence: sources to forecast, reorder and documents* (https://dbc-ce80c680-bd6d.cloud.databricks.com/jobs/345090492160596).
+- **Tasks** tab: the graph ingest_sources → governance_setup → data_product_pipeline → model_forecast_reorder → demo_checks + documents_vector_index; each task has a one-line description. `data_product_pipeline` is a pipeline task: click it → **View pipeline**.
+- **The pipeline** (*Grocery data product: POS, ERP and SaaS extracts to bronze, silver and gold*): the graph shows the 6 source extracts → bronze → silver → `gold_store_product_week`, plus `silver_quarantine` and `silver_quality_log`. Click a `*_checked` node → **Data quality**: rows failing each named rule (unknown store or item, negative stock, waste above available stock). Click the gold node: its row filter and cost mask are declared in the pipeline code, so governance ships with the table. Say: the pipeline declares *what* each table is; Databricks works out the order, retries and lineage.
+- Why the model is a separate task: training and registering a model is a decision with a gate, not a table refresh. The pipeline owns the data; the model task reads the pipeline's gold table and writes the forecast and reorder tables.
 - **Runs** tab: open the latest run to show every task's duration and the notebook output behind it.
 - Schedule: every Monday 06:00 UTC, created paused. Say: in production this runs after the Sunday stock count; Lakeflow Connect would trigger it when new source data lands.
-- **Models**: Catalog → `grocery_intel` → `demand_forecaster`: the latest version (11) holds the alias `champion`, linked to its MLflow run. Scoring points at the alias, so a rollback is moving the alias back.
+- **Models**: Catalog → `grocery_intel` → `demand_forecaster`: the latest version holds the alias `champion`, linked to its MLflow run. Scoring points at the alias, so a rollback is moving the alias back.
 
 ---
 
@@ -105,7 +106,7 @@ Walk it right to left:
 2. `gold_store_product_week` ← `silver_sales_weekly`, `silver_stock_snapshots`, `silver_waste_events`, `silver_products`, `silver_promotions`, `silver_stores`
 3. silver ← `bronze_pos_*` (Postgres POS), `bronze_erp_*` (MySQL ERP), `bronze_ops_waste_log` / `bronze_promo_calendar` (SaaS)
 4. bronze ← the raw extract files in the `raw` volume
-5. Click any bronze or silver table: the lineage panel names the **pipeline** that produces it; click a gold table: it names the **job** and the `03_gold` notebook. So every table answers "which process wrote me, and when".
+5. Click any bronze, silver table or `gold_store_product_week`: the lineage panel names the **pipeline** that produces it; click `gold_reorder_recommendation`: it names the **job** and the `03_gold` notebook. So every table answers "which process wrote me, and when".
 
 Then the documents chain: `gold_store_briefs` ← `silver_doc_chunks` ← `bronze_documents` + `bronze_document_files` ← the files in `raw/documents` and `raw/document_files`; the vector index `doc_chunks_index` hangs off `silver_doc_chunks`.
 
@@ -119,7 +120,7 @@ Talking point: lineage, quality and access control come from Unity Catalog autom
 ---
 
 ## 4. Apps: the same data product, built for the people who act on it (4 min)
-**Compute** → **Apps** (https://dbc-0a174280-b54a.cloud.databricks.com/apps-v2?o=7474648703926670). Code in `apps/`, deployed by `apps/deploy_apps.py`. Start them about 5 minutes before the demo (`deploy_apps.py`), stop them after (`--stop`).
+**Compute** → **Apps** (https://dbc-ce80c680-bd6d.cloud.databricks.com/apps-v2?o=7474657261879907). Code in `apps/`, deployed by `apps/deploy_apps.py`. Start them about 5 minutes before the demo (`deploy_apps.py`), stop them after (`--stop`).
 
 **`grocery-critical-items`** (store manager's Monday screen):
 - KPI tiles for the last 4 complete weeks: shelf availability, lost sales, waste at cost, number of critical items.
@@ -142,4 +143,4 @@ Talking point: lineage, quality and access control come from Unity Catalog autom
 ## Backup if something misbehaves
 - Genie gives a different answer: open the SQL and say how you'd fix it (add the definition to the instructions). The same 5 questions were tested through the Genie API before the demo.
 - Dashboard slow on first open: the serverless warehouse is starting. Use the `04_demo_queries` output of the last job run instead: same numbers, plus charts.
-- Rebuild the Genie space or dashboard: `python3 genie/build_genie_space.py --test` · `python3 dashboards/build_dashboard.py` (with `DATABRICKS_CONFIG_PROFILE=food WAREHOUSE_ID=5d7ed27d256c7dcf`).
+- Rebuild the Genie space or dashboard: `python3 genie/build_genie_space.py --test` · `python3 dashboards/build_dashboard.py` (with `DATABRICKS_CONFIG_PROFILE=retail WAREHOUSE_ID=0599a8b59a3c62bc`).

@@ -1,12 +1,15 @@
-"""Lakeflow Declarative Pipeline: raw source extracts -> bronze -> conformed silver, quarantine and quality log.
+"""Lakeflow Declarative Pipeline: raw source extracts -> bronze -> conformed silver (quarantine, quality log) -> gold facts.
 
-Same logic as notebooks/01_bronze.py and 02_silver.py (kept as the local-test version), declared as materialized
-views so the pipeline owns the tables: Unity Catalog lineage then shows this pipeline as the producer of every bronze
-and silver table, and the pipeline graph shows the flow from the six source files to silver.
+Same logic as notebooks/01_bronze.py, 02_silver.py and 03_gold.py section 3 (kept as the local-test version), declared
+as materialized views so the pipeline owns the tables: Unity Catalog lineage then shows this pipeline as the producer of
+every bronze, silver and gold fact table, and the pipeline graph shows the flow from the six source files to gold.
+The model (training, forecast, reorder) stays a notebook task after the pipeline: retraining is not a table refresh.
 
-Target: workspace.grocery_intel (set on the pipeline). Config key app.raw_dir points at the raw volume.
+Target: workspace.grocery_intel (set on the pipeline). Config: app.raw_dir (raw volume), app.as_of (fixed as-of date).
 Built and started by jobs/build_pipeline.py; the saved job runs it as a pipeline task after ingest_sources.
 """
+
+import re
 
 from pyspark import pipelines as dp
 from pyspark.sql import functions as F
@@ -315,3 +318,91 @@ def silver_quality_log():
     for part in parts[1:]:
         log = log.unionByName(part)
     return log.withColumn("checked_at", F.current_timestamp())
+
+
+# --- Gold: the weekly store-item data product (store x product x week) ---------------------------------------------
+AS_OF = spark.conf.get("app.as_of", "2026-10-21")  # same fixed as-of date as the generator: the current week is partial
+
+# Explicit schema so Unity Catalog can attach the row filter and the column mask (both need the functions from 00b_governance)
+GOLD_WEEK_SCHEMA = """
+  store_id STRING, item_id STRING, week_num INT, store_name STRING, region STRING, store_size STRING,
+  product_name STRING, category STRING, perishable BOOLEAN, shelf_life_days INT, case_pack INT,
+  unit_cost DOUBLE MASK workspace.grocery_intel.gov_cost_mask, unit_price DOUBLE, week_start DATE,
+  period_days INT COMMENT 'Days covered by data: 7, fewer for the current partial week',
+  is_partial_week BOOLEAN, is_promo BOOLEAN, discount_pct INT, units_sold INT, days_in_stock INT, stockout_days INT,
+  availability_pct DOUBLE COMMENT 'Share of days in the period the item was in stock',
+  est_demand DOUBLE COMMENT 'Estimated weekly demand = units_sold / days_in_stock * 7 (corrects for stockouts)',
+  revenue DOUBLE, on_hand INT, on_order INT, received INT, waste_units BIGINT, expired_units BIGINT, damaged_units BIGINT,
+  waste_value DOUBLE,
+  is_spike_week BOOLEAN COMMENT 'One-off spike (robust MAD rule): kept, but excluded from forecasts'
+"""
+GOLD_WEEK_COLUMNS = [c.split()[0] for c in re.split(r",(?=(?:[^']*'[^']*')*[^']*$)", GOLD_WEEK_SCHEMA) if c.strip()]  # commas outside quotes
+
+
+@dp.temporary_view(name="store_product_week_base")
+def store_product_week_base():
+    # Weekly store-item facts from the three sources joined on the conformed keys
+    # EDGE: price changed mid-period: the join picks the price version valid in each week (revenue and waste $ use it)
+    # TRAP: demand from in-stock days (est_demand), not raw sales: raw sales hide demand lost to empty shelves
+    period = f"LEAST(7, datediff(DATE'{AS_OF}', s.week_start) + 1)"
+    return spark.sql(f"""
+    WITH waste_week AS (
+      SELECT store_id, item_id, week_start,
+             SUM(waste_units) AS waste_units,
+             SUM(CASE WHEN reason = 'expired' THEN waste_units ELSE 0 END) AS expired_units,
+             SUM(CASE WHEN reason = 'damaged' THEN waste_units ELSE 0 END) AS damaged_units
+      FROM silver_waste_events GROUP BY store_id, item_id, week_start),
+    first_week AS (SELECT MIN(week_start) AS first_week FROM silver_sales_weekly)
+    SELECT s.store_id, s.item_id, CAST(datediff(s.week_start, fw.first_week) / 7 AS INT) + 1 AS week_num,
+           st.store_name, st.region, st.store_size, p.product_name, p.category, p.perishable,
+           p.shelf_life_days, p.case_pack, p.unit_cost, p.unit_price, s.week_start,
+           {period} AS period_days, {period} < 7 AS is_partial_week,
+           pr.discount_pct IS NOT NULL AS is_promo, COALESCE(pr.discount_pct, 0) AS discount_pct,
+           s.units_sold, s.days_in_stock, {period} - s.days_in_stock AS stockout_days,
+           ROUND(s.days_in_stock / {period}, 4) AS availability_pct,
+           CASE WHEN s.days_in_stock > 0 THEN ROUND(s.units_sold / s.days_in_stock * 7, 1) END AS est_demand,
+           ROUND(s.units_sold * p.unit_price * (1 - COALESCE(pr.discount_pct, 0) / 100), 2) AS revenue,
+           n.on_hand, n.on_order, n.received,
+           COALESCE(w.waste_units, 0) AS waste_units, COALESCE(w.expired_units, 0) AS expired_units,
+           COALESCE(w.damaged_units, 0) AS damaged_units,
+           ROUND(COALESCE(w.waste_units, 0) * p.unit_cost, 2) AS waste_value
+    FROM silver_sales_weekly s
+    CROSS JOIN first_week fw
+    JOIN silver_stores st ON st.store_id = s.store_id
+    JOIN silver_products p ON p.item_id = s.item_id AND s.week_start BETWEEN p.valid_from AND p.valid_to
+    LEFT JOIN silver_promotions pr ON pr.item_id = s.item_id AND pr.week_start = s.week_start
+    LEFT JOIN silver_stock_snapshots n ON n.store_id = s.store_id AND n.item_id = s.item_id AND n.week_start = s.week_start
+    LEFT JOIN waste_week w ON w.store_id = s.store_id AND w.item_id = s.item_id AND w.week_start = s.week_start""")
+
+
+def spike_weeks(g):
+    # EDGE: legitimate outlier: a week more than 3.5 robust deviations (median + MAD) above the store-item's own trend line
+    import numpy as np
+    import pandas as pd
+    out = pd.DataFrame({"store_id": pd.Series(dtype=str), "item_id": pd.Series(dtype=str), "week_num": pd.Series(dtype="int32")})
+    if len(g) < 6:
+        return out
+    x, y = g.week_num.to_numpy(float), g.est_demand.to_numpy(float)
+    slope, intercept = np.polyfit(x, y, 1)
+    resid = y - (slope * x + intercept)
+    med = np.median(resid)
+    mad = 1.4826 * np.median(np.abs(resid - med))
+    limit = 3.5 * max(mad, np.sqrt(y.mean()))  # floor at Poisson noise so very stable items don't flag every wiggle
+    hits = g.week_num[(resid - med) > limit].astype("int32")
+    return pd.DataFrame({"store_id": g.store_id.iloc[0], "item_id": g.item_id.iloc[0], "week_num": hits.to_numpy()})
+
+
+@dp.materialized_view(
+    name="gold_store_product_week", schema=GOLD_WEEK_SCHEMA,
+    row_filter="ROW FILTER workspace.grocery_intel.gov_store_filter ON (store_id)",
+    comment="Grain: store x product x week. Sales, stock, stockouts and waste, priced with the version valid that week.")
+def gold_store_product_week():
+    base = spark.read.table("store_product_week_base")
+    # SPARK: applyInPandas runs the spike scan per store-item in parallel (a shuffle by store_id, item_id), not on the driver
+    spikes = (base.where("NOT is_partial_week AND NOT is_promo AND est_demand IS NOT NULL")
+              .select("store_id", "item_id", "week_num", "est_demand")
+              .groupBy("store_id", "item_id").applyInPandas(spike_weeks, "store_id STRING, item_id STRING, week_num INT")
+              .withColumn("is_spike_week", F.lit(True)))
+    return (base.join(spikes, ["store_id", "item_id", "week_num"], "left")
+            .withColumn("is_spike_week", F.coalesce("is_spike_week", F.lit(False)))
+            .select(*GOLD_WEEK_COLUMNS))

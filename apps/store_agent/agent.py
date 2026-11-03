@@ -11,7 +11,7 @@ import time
 import grocery_data as data
 
 LLM = os.environ.get("LLM_ENDPOINT", "databricks-meta-llama-3-3-70b-instruct")
-GENIE_SPACE_ID = os.environ.get("GENIE_SPACE_ID", "01f1d74831d813fe87330e09c853ca47")
+GENIE_SPACE_ID = os.environ["GENIE_SPACE_ID"]  # app.yaml: from the genie-space resource; locally: export it
 MAX_STEPS = 5
 
 TOOLS = [

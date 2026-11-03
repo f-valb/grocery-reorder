@@ -2,7 +2,7 @@
 
     DATABRICKS_CONFIG_PROFILE=food WAREHOUSE_ID=5d7ed27d256c7dcf python3 genie/build_genie_space.py [--test]
 
-Creates the space (or updates it, using the id in genie/space_id.txt) over the gold tables, with business
+Creates the space (or updates it, using the id in genie/space_id.<profile>.txt) over the gold tables, with business
 instructions and sample questions. --test asks each sample question through the Conversation API and prints
 Genie's SQL and the first result rows. Auth comes from the CLI profile.
 """
@@ -16,12 +16,16 @@ import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+PROFILE = os.environ.get("DATABRICKS_CONFIG_PROFILE", "DEFAULT")  # ids are saved per workspace profile
 S = "workspace.grocery_intel"
 TITLE = "Grocery store assistant"
 DESCRIPTION = "Ask about availability, stockouts, waste, next week's orders and the demand forecast for 20 stores."
 
 TABLES = ["gold_store_product_week", "gold_demand_forecast", "gold_reorder_recommendation", "gold_backtest_summary",
-          "gold_model_monitor", "silver_stores", "silver_quality_log", "gold_store_briefs"]
+          "gold_model_monitor", "silver_stores", "silver_quality_log", "gold_store_briefs",
+          # TRAP: the row filter declared in the pipeline reads gov_store_managers, and Genie only runs SQL over its own
+          # sources: without the mapping table every query on gold_store_product_week fails with PERMISSION_DENIED
+          "gov_store_managers"]
 
 INSTRUCTIONS = [
     "A grocery chain with 20 stores (store_id ST-01 to ST-20, names in silver_stores) and 41 products in 6 categories. "
@@ -118,7 +122,7 @@ def ask(space_id, question):
 if __name__ == "__main__":
     warehouse = os.environ["WAREHOUSE_ID"]
     user = cli("current-user", "me")["userName"]
-    id_file = HERE / "space_id.txt"
+    id_file = HERE / f"space_id.{PROFILE}.txt"
     if id_file.exists():
         space_id = id_file.read_text().strip()
         cli("genie", "update-space", space_id, "--serialized-space", serialized_space(), "--title", TITLE,

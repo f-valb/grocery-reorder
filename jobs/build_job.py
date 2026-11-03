@@ -3,18 +3,20 @@
     DATABRICKS_CONFIG_PROFILE=food python3 jobs/build_job.py [--run]
 
 Uploads notebooks/ to /Users/<me>/<folder>/notebooks, then creates the job (or resets it, using the id in
-jobs/job_id.txt). Task graph:
+jobs/job_id.<profile>.txt). Task graph:
 
-    ingest_sources -> bronze_silver_pipeline -> gold_forecast_model -> demo_checks
-                                                         \\-> documents_vector_index
+    ingest_sources -> governance_setup -> data_product_pipeline -> model_forecast_reorder -> demo_checks
+                                                                                       \\-> documents_vector_index
 
-bronze_silver_pipeline is a pipeline task: the Lakeflow Declarative Pipeline from jobs/build_pipeline.py (created or
-updated first), so Unity Catalog lineage shows the pipeline as the producer of the bronze and silver tables.
+data_product_pipeline is a pipeline task: the Lakeflow Declarative Pipeline from jobs/build_pipeline.py (created or
+updated first) builds bronze, silver and gold_store_product_week, so Unity Catalog lineage shows the pipeline as their
+producer. governance_setup runs first because the pipeline declares the row filter and mask functions it creates.
 
 --run starts one run, waits for it and prints each task's state and the run URL. Auth comes from the CLI profile.
 """
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -23,16 +25,19 @@ from pathlib import Path
 from build_pipeline import ensure_pipeline
 
 HERE = Path(__file__).resolve().parent
+PROFILE = os.environ.get("DATABRICKS_CONFIG_PROFILE", "DEFAULT")  # ids are saved per workspace profile
 ROOT = HERE.parent
 JOB_NAME = "Grocery intelligence: sources to forecast, reorder and documents"
 TASKS = [  # task key, notebook, upstream tasks, what it does (shown as the task description)
     ("ingest_sources", "00_generate_data", [], "Land the POS, ERP and SaaS extracts (mocked) in the raw volume"),
-    ("bronze_silver_pipeline", None, ["ingest_sources"],
-     "Pipeline: read each source with an explicit schema, map to one store-item key, fix timezones, quarantine bad rows"),
-    ("gold_forecast_model", "03_gold", ["bronze_silver_pipeline"],
-     "Weekly facts, train and gate the demand model, reorder list, backtest, row filter, checks"),
-    ("demo_checks", "04_demo_queries", ["gold_forecast_model"], "Business answers, data product checks, rerun check, plan"),
-    ("documents_vector_index", "05_documents_rag", ["gold_forecast_model"],
+    ("governance_setup", "00b_governance", ["ingest_sources"],
+     "Store manager mapping, row filter and cost mask functions (the pipeline's gold table uses them)"),
+    ("data_product_pipeline", None, ["governance_setup"],
+     "Pipeline: sources to bronze (explicit schemas), silver (one store-item key, timezones, quarantine), gold weekly facts"),
+    ("model_forecast_reorder", "03_gold", ["data_product_pipeline"],
+     "Train and gate the demand model, next week's forecast and reorder list, backtest, checks"),
+    ("demo_checks", "04_demo_queries", ["model_forecast_reorder"], "Business answers, data product checks, rerun check, plan"),
+    ("documents_vector_index", "05_documents_rag", ["model_forecast_reorder"],
      "Parse PDF/Word/image documents, sync the vector index, grounded answers and store briefs"),
 ]
 
@@ -65,7 +70,7 @@ if __name__ == "__main__":
     pipeline_id = ensure_pipeline(user)
     print(f"pipeline: {pipeline_id}")
     settings = job_settings(notebook_dir, pipeline_id)
-    id_file = HERE / "job_id.txt"
+    id_file = HERE / f"job_id.{PROFILE}.txt"
     if id_file.exists():
         job_id = id_file.read_text().strip()
         cli("jobs", "reset", "--json", json.dumps({"job_id": int(job_id), "new_settings": settings}))

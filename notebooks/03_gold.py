@@ -2,7 +2,7 @@
 # MAGIC %md
 # MAGIC # 03 Gold: the store-item data product and the demand model
 # MAGIC **Purpose:** weekly store-item performance, a trained demand model that must beat a simple forecast to be used, next week's reorder list, a backtest of both, governance, and checks.
-# MAGIC **Inputs:** `silver_*`
+# MAGIC **Inputs:** `gold_store_product_week` (built by the Lakeflow pipeline, with its row filter and cost mask), `silver_*`
 # MAGIC **Outputs:**
 # MAGIC | Table | Grain |
 # MAGIC |---|---|
@@ -12,7 +12,6 @@
 # MAGIC | `gold_backtest` / `gold_backtest_summary` | store × product × backtest week × method / slice × method |
 # MAGIC | `gold_model_monitor` | one row per monitored feature, plus the gate decision |
 # MAGIC | `gold_signal_check`, `gold_quality_check` | one row per check |
-# MAGIC | `gov_store_managers` | one row per user and store they may see |
 
 # COMMAND ----------
 
@@ -63,11 +62,13 @@ PSI_ALERT = 0.25         # drift score above this raises retrain_needed (kit def
 # MAGIC %md
 # MAGIC ## 3 Core aggregates
 # MAGIC One row per store × product × week: sales, stockouts, availability, estimated demand, waste units and value, with the price valid in that week.
+# MAGIC **On Databricks the pipeline builds this table** (`pipelines/grocery_sources.py`, same SQL and spike rule, declared with the row filter and cost mask). The two cells below build it only for the local PySpark test.
 
 # COMMAND ----------
 
-# Weekly store-item facts from the three sources joined on the conformed keys
-spark.sql(f"""
+# Local test only: weekly store-item facts from the three sources joined on the conformed keys (the pipeline does this on Databricks)
+if not IS_DATABRICKS:
+    spark.sql(f"""
 CREATE OR REPLACE TEMP VIEW store_product_week_base AS
 WITH waste_week AS (
   SELECT store_id, item_id, week_start,
@@ -113,9 +114,6 @@ LEFT JOIN waste_week w ON w.store_id = s.store_id AND w.item_id = s.item_id AND 
 # COMMAND ----------
 
 # EDGE: legitimate outlier: flag one-off spikes with median + 3.5 x MAD of the trend residuals (keep the row, exclude from the baseline)
-weekly = spark.table("store_product_week_base").toPandas()
-weekly.attrs = {}
-weekly["week_start"] = pd.to_datetime(weekly.week_start)
 
 
 def spike_flags(weekly):
@@ -136,15 +134,21 @@ def spike_flags(weekly):
     return pd.DataFrame(flags, columns=["store_id", "item_id", "week_num"])
 
 
-spikes = spike_flags(weekly).assign(is_spike_week=True)
-weekly = weekly.merge(spikes, on=["store_id", "item_id", "week_num"], how="left")
-weekly["is_spike_week"] = weekly.is_spike_week.astype("boolean").fillna(False).astype(bool)
+if not IS_DATABRICKS:  # local test only: on Databricks the pipeline flags spikes with the same rule (applyInPandas)
+    base_pd = spark.table("store_product_week_base").toPandas()
+    base_pd["week_start"] = pd.to_datetime(base_pd.week_start)
+    spikes = spike_flags(base_pd)
+    spike_df = spark.createDataFrame(spikes.assign(is_spike_week=True) if len(spikes) else
+                                     pd.DataFrame({"store_id": ["-"], "item_id": ["-"], "week_num": [0], "is_spike_week": [True]}))
+    (spark.table("store_product_week_base")
+     .join(F.broadcast(spike_df), ["store_id", "item_id", "week_num"], "left")  # SPARK: a handful of flags, broadcast
+     .withColumn("is_spike_week", F.coalesce("is_spike_week", F.lit(False)))
+     .write.mode("overwrite").option("overwriteSchema", True).saveAsTable("gold_store_product_week"))
 
-spike_df = spark.createDataFrame(spikes if len(spikes) else pd.DataFrame({"store_id": ["-"], "item_id": ["-"], "week_num": [0], "is_spike_week": [True]}))
-(spark.table("store_product_week_base")
- .join(F.broadcast(spike_df), ["store_id", "item_id", "week_num"], "left")  # SPARK: a handful of flags, broadcast
- .withColumn("is_spike_week", F.coalesce("is_spike_week", F.lit(False)))
- .write.mode("overwrite").option("overwriteSchema", True).saveAsTable("gold_store_product_week"))
+# The model works on the weekly facts in pandas (11k rows); is_spike_week comes from the pipeline
+weekly = spark.table("gold_store_product_week").toPandas()
+weekly.attrs = {}
+weekly["week_start"] = pd.to_datetime(weekly.week_start)
 
 # At scale: this table would be partitioned or liquid-clustered by week_start and store_id, so a store manager's query
 # reads one store's files only; the spike scan would run per store-item with applyInPandas instead of a driver loop.
@@ -475,11 +479,6 @@ for out, table in [(forecast_out, "gold_demand_forecast"), (reorder_out, "gold_r
 
 # Table and column comments in Unity Catalog (no apostrophes: they break the SQL string)
 comments = {
-    "gold_store_product_week": ("Grain: store x product x week. Sales, stock, stockouts and waste, priced with the version valid that week.",
-                                {"est_demand": "Estimated weekly demand = units_sold / days_in_stock * 7 (corrects for stockouts)",
-                                 "availability_pct": "Share of days in the period the item was in stock",
-                                 "is_spike_week": "One-off spike (robust MAD rule): kept, but excluded from forecasts",
-                                 "period_days": "Days covered by data: 7, fewer for the current partial week"}),
     "gold_demand_forecast": ("Grain: store x product for next week. Champion method (model or baseline) chosen by the backtest gate.",
                              {"forecast_units": "Expected demand next week from the champion method",
                               "forecast_low": "Low end of the 80% range", "forecast_high": "High end of the 80% range",
@@ -491,6 +490,7 @@ comments = {
     "gold_backtest": ("Grain: method x store x product x backtest week. Recommendations replayed against actual demand.", {}),
     "gold_backtest_summary": ("Grain: slice x method. Forecast error and simulated vs actual stockouts, waste and lost margin.", {}),
 }
+# gold_store_product_week gets its comments from the pipeline definition (a materialized view can't be altered here)
 for table, (table_comment, cols) in comments.items():
     spark.sql(f"COMMENT ON TABLE {table} IS '{table_comment}'")
     for col, text in cols.items():
@@ -498,26 +498,21 @@ for table, (table_comment, cols) in comments.items():
 
 # COMMAND ----------
 
-# Governance: who may see which store (mock managers plus the pipeline owner, who sees everything)
-owner = spark.sql("SELECT current_user()").first()[0]
-spark.createDataFrame(
-    [(owner, "ALL", "admin")] + [(f"manager.{s.lower()}@example.com", s, "store_manager") for s in sorted(weekly.store_id.unique())]
-    + [("finance.lead@example.com", "ALL", "finance")],
-    "user_email STRING, store_id STRING, role STRING").write.mode("overwrite").saveAsTable("gov_store_managers")
+# Governance: on Databricks, 00b_governance creates the mapping and functions before the pipeline; local test only here
+if not IS_DATABRICKS:
+    owner = spark.sql("SELECT current_user()").first()[0]
+    spark.createDataFrame(
+        [(owner, "ALL", "admin")] + [(f"manager.{s.lower()}@example.com", s, "store_manager") for s in sorted(weekly.store_id.unique())]
+        + [("finance.lead@example.com", "ALL", "finance")],
+        "user_email STRING, store_id STRING, role STRING").write.mode("overwrite").saveAsTable("gov_store_managers")
 
 # COMMAND ----------
 
-# Row filter (store managers see their own store) and column mask (only admin and finance see unit cost); Unity Catalog only
+# Row filter on the model outputs (store managers see their own store); the functions come from 00b_governance, and
+# gold_store_product_week already has its filter and cost mask declared in the pipeline. Unity Catalog only.
 if IS_DATABRICKS:
-    spark.sql("""CREATE OR REPLACE FUNCTION gov_store_filter(store STRING) RETURNS BOOLEAN
-      RETURN EXISTS (SELECT 1 FROM workspace.grocery_intel.gov_store_managers g
-                     WHERE g.user_email = current_user() AND (g.store_id = store OR g.store_id = 'ALL'))""")
-    spark.sql("""CREATE OR REPLACE FUNCTION gov_cost_mask(cost DOUBLE) RETURNS DOUBLE
-      RETURN CASE WHEN EXISTS (SELECT 1 FROM workspace.grocery_intel.gov_store_managers g
-                               WHERE g.user_email = current_user() AND g.role IN ('admin', 'finance')) THEN cost END""")
-    for table in ["gold_store_product_week", "gold_reorder_recommendation", "gold_demand_forecast"]:
+    for table in ["gold_reorder_recommendation", "gold_demand_forecast"]:
         spark.sql(f"ALTER TABLE {table} SET ROW FILTER gov_store_filter ON (store_id)")
-    spark.sql("ALTER TABLE gold_store_product_week ALTER COLUMN unit_cost SET MASK gov_cost_mask")
 # TRAP: a dashboard published with embedded credentials runs as its owner (role admin) and skips this filter:
 # publish without embedded credentials so each viewer sees only their own store.
 
