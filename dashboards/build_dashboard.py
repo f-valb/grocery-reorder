@@ -122,7 +122,7 @@ if __name__ == "__main__":
     else:
         dash = cli("lakeview", "create", "--json", json.dumps(payload))
         id_file.write_text(dash["dashboard_id"] + "\n")
-    cli("lakeview", "publish", dash["dashboard_id"], "--json", json.dumps({"embed_credentials": True, "warehouse_id": warehouse}))
+    cli("lakeview", "publish", dash["dashboard_id"], "--json", json.dumps({"embed_credentials": False, "warehouse_id": warehouse}))
     host = subprocess.run(["databricks", "auth", "describe", "-o", "json"], capture_output=True, text=True)
     host = json.loads(host.stdout)["details"]["host"].rstrip("/")
     print(f"{host}/dashboardsv3/{dash['dashboard_id']}/published")

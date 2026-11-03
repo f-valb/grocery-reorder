@@ -34,3 +34,5 @@
 - Drift: PSI on the 4 continuous model inputs, training rows vs next week's scoring rows, alert above 0.25 (kit default).
 - Governance: `gov_store_managers` mapping table, row filter on store_id for the 3 store-facing gold tables, column mask on unit_cost (admin and finance only). Written for Unity Catalog, not testable on local Spark.
 - `CREATE OR REPLACE TABLE ... AS` is avoided in gold: local Spark has no Delta; DataFrame overwrite works in both.
+- Serverless (Free Edition) findings: UC model registry upload is denied (S3 AccessDenied), so gold tries UC registration and falls back to logging the model in the MLflow experiment; the gate result and registry status are stored in `gold_model_monitor`. Unity Catalog blocks time travel on tables with a row filter or column mask, so the rerun check compares per-run fingerprints (row count + sum of xxhash64, `model_version` excluded as run metadata) in `gold_run_fingerprint`.
+- The v2 dashboard is published without embedded credentials, so the row filter applies per viewer.

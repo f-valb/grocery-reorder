@@ -11,8 +11,6 @@
 import io
 from contextlib import redirect_stdout
 
-from pyspark.sql import functions as F
-
 spark.sql("USE workspace.grocery_intel")
 
 # COMMAND ----------
@@ -230,24 +228,25 @@ display(spark.sql("SELECT signal_name, ROUND(value, 3) AS value, low, high, pass
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC **Rerun check (idempotency):** rerunning gold must not change its data. Compare the last two *data writes* in the Delta history.
-# MAGIC COMMENT, ALTER and row-filter statements also create versions, so "latest − 1" would compare a table with itself and always pass: only write operations are used.
+# MAGIC **Rerun check (idempotency):** rerunning gold must not change its data. Each gold run appends a fingerprint (row count + sum of row hashes) per table to `gold_run_fingerprint`; the last two runs must match.
+# MAGIC Why not Delta time travel: Unity Catalog blocks `versionAsOf` on tables with a row filter or column mask, which the gold tables have.
 
 # COMMAND ----------
 
-# QUALITY: idempotency: the last two data writes of a gold table hold exactly the same rows (exceptAll both ways)
-# SPARK: Delta time travel (versionAsOf) reads an older snapshot of the same table
-for table in ["gold_store_product_week", "gold_reorder_recommendation"]:
-    writes = (spark.sql(f"DESCRIBE HISTORY {table}")
-              .where(F.col("operation").isin("CREATE OR REPLACE TABLE AS SELECT", "WRITE", "CREATE TABLE AS SELECT"))
-              .orderBy(F.col("version").desc()).limit(2).collect())
-    if len(writes) < 2:
-        print(f"{table}: only {len(writes)} data write so far: rerun 03_gold, then this check")
-        continue
-    newer, older = (spark.read.option("versionAsOf", w.version).table(table) for w in writes)
-    added, removed = newer.exceptAll(older).count(), older.exceptAll(newer).count()
-    print(f"{table}: versions {writes[1].version} -> {writes[0].version}: {added} rows added, {removed} removed "
-          f"-> {'IDEMPOTENT' if added == removed == 0 else 'CHANGED'}")
+# QUALITY: idempotency: compare the last two gold runs table by table (same rows and same content hash = idempotent)
+display(spark.sql("""
+WITH ranked AS (
+  SELECT *, DENSE_RANK() OVER (ORDER BY run_at DESC) AS run_rank FROM gold_run_fingerprint)
+SELECT n.table_name, o.run_at AS previous_run, n.run_at AS latest_run, o.row_count AS previous_rows, n.row_count AS latest_rows,
+       o.content_hash = n.content_hash AND o.row_count = n.row_count AS idempotent
+FROM ranked n JOIN ranked o ON o.table_name = n.table_name AND n.run_rank = 1 AND o.run_rank = 2
+ORDER BY n.table_name"""))
+
+# COMMAND ----------
+
+# Delta history of one gold table: every write, comment and row-filter change is a version (metadata only, allowed under the row filter)
+# SPARK: Delta keeps a transaction log per table; DESCRIBE HISTORY reads it without scanning data
+display(spark.sql("DESCRIBE HISTORY gold_reorder_recommendation").select("version", "timestamp", "operation").limit(10))
 
 # COMMAND ----------
 

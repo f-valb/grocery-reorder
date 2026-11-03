@@ -374,17 +374,27 @@ with mlflow.start_run(run_name=f"demand_forecaster_week_{current_week + 1}") as 
     mlflow.log_metrics({"backtest_wape_model": wape["model"], "backtest_wape_baseline": wape["baseline"],
                         "champion_is_model": int(model_is_champion)})
     signature = mlflow.models.infer_signature(model_matrix(train_all), final_models["point"].predict(model_matrix(train_all)))
-    info = mlflow.sklearn.log_model(final_models["point"], "model", signature=signature,
-                                    registered_model_name=MODEL_NAME if IS_DATABRICKS else None)
-    for q in ("low", "high"):
-        mlflow.sklearn.log_model(final_models[q], f"model_{q}")
-model_version = f"local-{run.info.run_id[:8]}"
-if IS_DATABRICKS:
+    registry_status, info = "not attempted (local run)", None
+    if IS_DATABRICKS:
+        try:
+            info = mlflow.sklearn.log_model(final_models["point"], "model", signature=signature, registered_model_name=MODEL_NAME)
+            registry_status = "registered in Unity Catalog"
+        except Exception as e:  # Free Edition denies writes to UC model storage: keep the run, log the model to the experiment
+            registry_status = f"UC registry unavailable ({type(e).__name__}): model logged to the experiment only"
+    if info is None:
+        try:
+            mlflow.sklearn.log_model(final_models["point"], "model", signature=signature)
+        except Exception as e:
+            registry_status += f"; experiment artifact upload failed ({type(e).__name__}): params and metrics only"
+    mlflow.set_tags({"gate": gate_reason, "champion_method": champion_method, "registry_status": registry_status})
+model_version = f"run-{run.info.run_id[:8]}"
+if info is not None and info.registered_model_version:
     client = mlflow.MlflowClient()
-    model_version = info.registered_model_version
+    model_version = str(info.registered_model_version)
     if model_is_champion:
         client.set_registered_model_alias(MODEL_NAME, "champion", model_version)
     client.set_model_version_tag(MODEL_NAME, model_version, "gate", gate_reason)
+print(model_version, registry_status)
 
 # At scale: the gate and retrain run as a scheduled job (train -> compare -> condition task -> set alias), and scoring
 # loads models:/demand_forecaster@champion, so a rollback is moving the alias back.
@@ -568,7 +578,8 @@ for feature in DRIFT_FEATURES:
     value = psi(proportions(train_matrix[feature].to_numpy(float), edges), proportions(score_matrix[feature].to_numpy(float), edges))
     monitor_rows.append({"check_name": f"psi_{feature}", "value": round(value, 4), "threshold": PSI_ALERT, "alert": value > PSI_ALERT})
 monitor_rows.append({"check_name": "backtest_wape_model", "value": wape["model"], "threshold": wape["baseline"], "alert": not model_is_champion})
-monitor = pd.DataFrame(monitor_rows).assign(champion_method=champion_method, model_version=model_version, gate_reason=gate_reason)
+monitor = pd.DataFrame(monitor_rows).assign(champion_method=champion_method, model_version=model_version, gate_reason=gate_reason,
+                                             registry_status=registry_status)
 monitor["retrain_needed"] = bool(monitor.alert.any())
 spark.createDataFrame(monitor).write.mode("overwrite").option("overwriteSchema", True).saveAsTable("gold_model_monitor")
 display(spark.table("gold_model_monitor"))
@@ -594,3 +605,17 @@ display(spark.table("gold_quality_check"))
 
 # At scale: these checks would be Lakeflow expectations or Lakehouse Monitoring on the gold tables, with SQL alerts
 # on gold_quality_check and gold_model_monitor.retrain_needed.
+
+# COMMAND ----------
+
+# QUALITY: run fingerprint for the rerun (idempotency) check: row count + sum of row hashes per gold table, appended per run
+# TRAP: time travel (versionAsOf) is not allowed on tables with a row filter or column mask, so reruns are compared by fingerprint
+run_at = spark.sql("SELECT current_timestamp() AS ts").first().ts
+fingerprints = None
+for table in ["gold_store_product_week", "gold_demand_forecast", "gold_reorder_recommendation", "gold_backtest"]:
+    df = spark.table(table)
+    content_cols = [c for c in df.columns if c != "model_version"]  # run metadata: a new MLflow run id every run, by design
+    fp = df.select(F.lit(table).alias("table_name"), F.count("*").alias("row_count"),
+                   F.sum(F.xxhash64(*content_cols).cast("decimal(38,0)")).cast("string").alias("content_hash"))
+    fingerprints = fp if fingerprints is None else fingerprints.unionByName(fp)
+fingerprints.withColumn("run_at", F.lit(run_at)).write.mode("append").saveAsTable("gold_run_fingerprint")

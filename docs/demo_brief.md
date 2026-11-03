@@ -5,7 +5,8 @@
 **Built:** three mocked source systems → bronze (explicit schemas, lineage columns) → silver (one store-item view via the ERP crosswalk, quarantine with reasons) → gold data product (weekly store-item facts, trained demand model gated against a simple baseline, reorder list with reasons, backtest, drift monitor, row filter and cost mask) → demo notebook and AI/BI dashboard.
 Schema `workspace.grocery_intel`. v1 (single source, no ML) stays on `main` in `grocery_reorder`.
 
-**Verified locally only** (account locked): everything below ran on local PySpark 3.5 (`scripts/local_spark.py`). Not yet run on serverless: UC registry + champion alias, row filter / column mask, UC comments, DESCRIBE HISTORY rerun check, matplotlib chart, dashboard publish.
+**Verified on serverless** (workspace `food`, 2026-11-03): 00–04 pass, numbers match the local PySpark run. Dashboard: https://dbc-0a174280-b54a.cloud.databricks.com/dashboardsv3/01f1d72d64ab1c8b92f78b4c747b325a/published (8 datasets, 15 widgets; every dataset query checked on the warehouse; open it once to check the layout).
+Free Edition limits found and handled: the UC model registry denies model file uploads, so the model is logged to the MLflow experiment and the champion decision lives in `gold_model_monitor`; time travel is blocked on tables with a row filter, so the rerun check uses run fingerprints.
 
 ## Row counts per layer
 | Source system | Bronze | Silver | Quarantined | Re-sends removed |
@@ -19,7 +20,7 @@ Schema `workspace.grocery_intel`. v1 (single source, no ML) stays on `main` in `
 Every bronze row is accounted for (0 unexplained). Gold: `gold_store_product_week` 9,680 · forecast and reorder 820 store-items each · backtest 3,278 rows (2 methods × 2 weeks).
 
 ## Key numbers (gold)
-- Last 4 full weeks: availability **97.6%**, waste **$35.6k** at cost; next week's order $97.2k.
+- Last 4 full weeks: availability **97.6%**, waste **$35.6k** at cost; next week's order $97.0k.
 - Forecast error (WAPE, last 2 full weeks): **model 10.5% vs baseline 13.6%**. Promo weeks 10.4% vs 43.8%; normal weeks 10.5% vs 12.2%. The model is champion.
 - Backtest dollars (waste + lost margin over 2 weeks): actual $20.5k → baseline orders $13.9k → **model orders $13.0k** (≈ $7.5k better than what happened). Promo-week stockout days 81 → 1 with the model.
 - Model health: largest drift score (PSI) 0.18 on `trend_rel`, below the 0.25 alert; `retrain_needed` = false.
@@ -42,7 +43,7 @@ Every bronze row is accounted for (0 unexplained). Gold: `gold_store_product_wee
 | Timezone day shift | waste logged Sunday night local = Monday UTC | fix: week from store-local date | otherwise waste lands in the wrong week | 585 waste logs |
 | Small sample / new item | Protein Bar launched week 9 | keep, with fallback: <3 weeks → average of what exists; 0 weeks → category median at the store | a trend on 1–2 points is noise | 80 rows (20 stores) |
 | Legitimate outlier vs error | ST-12 festival (Beverages ×3, week 6) vs a 99,999 typo | keep the festival, flagged and excluded from forecasts (median + 3.5×MAD); quarantine the typo | real sales stay in reporting, one-offs don't drive orders | 7 festival rows (+2 other flags); 1 typo |
-| Rerun idempotency | gold rerun | check: last two data writes compared with `exceptAll` both ways | proves reruns don't change the data | serverless only |
+| Rerun idempotency | gold run twice | check: per-run fingerprint (row count + sum of row hashes) compared between the last two runs | proves reruns don't change the data; time travel is blocked on row-filtered tables | 4 of 4 gold tables identical (the check did flag `model_version` before it was excluded as run metadata) |
 
 ## Decisions and trade-offs
 - Core entity **store-item**: the ERP is the key master (holds POS ids and store names), so one crosswalk unifies all sources.
@@ -58,7 +59,7 @@ Every bronze row is accounted for (0 unexplained). Gold: `gold_store_product_wee
 - Partial current week → excluded from training and baseline; order uses stock expected at arrival.
 - One-off spikes and promos → excluded from the baseline (the model learns promos explicitly).
 - Dashboard with embedded credentials would bypass the row filter → publish without them for per-viewer filtering.
-- Delta history: COMMENT/ALTER create versions, so the rerun check compares the last two *write* operations only.
+- Rerun check: COMMENT/ALTER create Delta versions and row-filtered tables can't be time-travelled, so reruns are compared by fingerprints written by each gold run.
 
 ## Honest caveats
 - Short-life perishables (≤7 days) with weekly delivery: the shelf-life cap cuts waste $14.4k → $0.2k but adds $7.0k lost margin. Net positive; the real fix is two deliveries a week.
@@ -88,8 +89,7 @@ Every bronze row is accounted for (0 unexplained). Gold: `gold_store_product_wee
 | 04_demo_queries | 5 Execution plan | broadcast join, partial/final aggregate, AQE |
 
 ## What I'd do next
-1. Run the chain on serverless once the account is back (`run_notebooks.py 00_generate_data 01_bronze 02_silver 03_gold 04_demo_queries`, then `03_gold 04_demo_queries` again so the rerun check has two writes to compare), publish the dashboard with `dashboards/build_dashboard.py`, and open it.
-2. GenAI layer: a store manager assistant over the gold tables plus documents (supplier terms, shelf-life SOPs, promo plans).
-3. Two deliveries a week for short-life perishables; re-run the backtest.
-4. Supplier fill rates per item, so constrained items are ordered earlier or substituted.
-5. Schedule train → gate → score as a job with a condition task on `retrain_needed`; Lakeflow Connect for the real Postgres/MySQL sources.
+1. GenAI layer: a store manager assistant over the gold tables plus documents (supplier terms, shelf-life SOPs, promo plans).
+2. Two deliveries a week for short-life perishables; re-run the backtest.
+3. Supplier fill rates per item, so constrained items are ordered earlier or substituted.
+4. Model registry on a paid workspace (UC alias `champion`, already coded); schedule train → gate → score as a job with a condition task on `retrain_needed`; Lakeflow Connect for the real Postgres/MySQL sources.
