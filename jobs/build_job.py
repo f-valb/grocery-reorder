@@ -1,31 +1,35 @@
 """Lakeflow Job: the whole grocery pipeline as one saved, scheduled job (schedule paused), with an optional run.
 
-    DATABRICKS_CONFIG_PROFILE=food WAREHOUSE_ID=5d7ed27d256c7dcf python3 jobs/build_job.py [--run]
+    DATABRICKS_CONFIG_PROFILE=food python3 jobs/build_job.py [--run]
 
 Uploads notebooks/ to /Users/<me>/<folder>/notebooks, then creates the job (or resets it, using the id in
 jobs/job_id.txt). Task graph:
 
-    ingest_sources -> bronze -> silver_unify -> gold_forecast_model -> demo_checks
-                                                                    \\-> documents_vector_index
+    ingest_sources -> bronze_silver_pipeline -> gold_forecast_model -> demo_checks
+                                                         \\-> documents_vector_index
+
+bronze_silver_pipeline is a pipeline task: the Lakeflow Declarative Pipeline from jobs/build_pipeline.py (created or
+updated first), so Unity Catalog lineage shows the pipeline as the producer of the bronze and silver tables.
 
 --run starts one run, waits for it and prints each task's state and the run URL. Auth comes from the CLI profile.
 """
 
 import json
-import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from build_pipeline import ensure_pipeline
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 JOB_NAME = "Grocery intelligence: sources to forecast, reorder and documents"
 TASKS = [  # task key, notebook, upstream tasks, what it does (shown as the task description)
     ("ingest_sources", "00_generate_data", [], "Land the POS, ERP and SaaS extracts (mocked) in the raw volume"),
-    ("bronze", "01_bronze", ["ingest_sources"], "Read each source with an explicit schema, add lineage columns"),
-    ("silver_unify", "02_silver", ["bronze"], "Map all sources to one store-item key, fix timezones, quarantine bad rows"),
-    ("gold_forecast_model", "03_gold", ["silver_unify"],
+    ("bronze_silver_pipeline", None, ["ingest_sources"],
+     "Pipeline: read each source with an explicit schema, map to one store-item key, fix timezones, quarantine bad rows"),
+    ("gold_forecast_model", "03_gold", ["bronze_silver_pipeline"],
      "Weekly facts, train and gate the demand model, reorder list, backtest, row filter, checks"),
     ("demo_checks", "04_demo_queries", ["gold_forecast_model"], "Business answers, data product checks, rerun check, plan"),
     ("documents_vector_index", "05_documents_rag", ["gold_forecast_model"],
@@ -40,9 +44,12 @@ def cli(*args):
     return json.loads(out.stdout or "{}")
 
 
-def job_settings(notebook_dir, warehouse):
-    tasks = [{"task_key": key, "description": text, "notebook_task": {"notebook_path": f"{notebook_dir}/{nb}"},
-              "depends_on": [{"task_key": d} for d in deps]} for key, nb, deps, text in TASKS]
+def job_settings(notebook_dir, pipeline_id):
+    # A task with no notebook is the pipeline task; full refresh rebuilds every materialized view from the raw files
+    tasks = [{"task_key": key, "description": text, "depends_on": [{"task_key": d} for d in deps],
+              **({"notebook_task": {"notebook_path": f"{notebook_dir}/{nb}"}} if nb else
+                 {"pipeline_task": {"pipeline_id": pipeline_id, "full_refresh": True}})}
+             for key, nb, deps, text in TASKS]
     # No dashboard refresh task: AI/BI dashboards query the live gold tables when opened, and on Free Edition a
     # dashboard task fails ("Failed to create delegation claim")
     return {"name": JOB_NAME, "tasks": tasks, "max_concurrent_runs": 1,
@@ -51,12 +58,13 @@ def job_settings(notebook_dir, warehouse):
 
 
 if __name__ == "__main__":
-    warehouse = os.environ["WAREHOUSE_ID"]
     user = cli("current-user", "me")["userName"]
     notebook_dir = f"/Users/{user}/{ROOT.name}/notebooks"
     subprocess.run(["databricks", "workspace", "import-dir", str(ROOT / "notebooks"), notebook_dir, "--overwrite"],
                    check=True, capture_output=True)
-    settings = job_settings(notebook_dir, warehouse)
+    pipeline_id = ensure_pipeline(user)
+    print(f"pipeline: {pipeline_id}")
+    settings = job_settings(notebook_dir, pipeline_id)
     id_file = HERE / "job_id.txt"
     if id_file.exists():
         job_id = id_file.read_text().strip()

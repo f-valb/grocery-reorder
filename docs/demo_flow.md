@@ -89,7 +89,8 @@ Talking point: the dashboard is published without embedded credentials, so a sto
 
 ## 2b. The pipeline as a job (1 min)
 **Jobs & Pipelines** → *Grocery intelligence: sources to forecast, reorder and documents* (https://dbc-0a174280-b54a.cloud.databricks.com/jobs/921270369760005).
-- **Tasks** tab: the graph ingest_sources → bronze → silver_unify → gold_forecast_model → demo_checks + documents_vector_index; each task has a one-line description.
+- **Tasks** tab: the graph ingest_sources → bronze_silver_pipeline → gold_forecast_model → demo_checks + documents_vector_index; each task has a one-line description. `bronze_silver_pipeline` is a pipeline task: click it → **View pipeline**.
+- **The pipeline** (*Grocery sources: POS, ERP and SaaS extracts to bronze and silver*): the graph shows the 6 source extracts → bronze → silver, plus `silver_quarantine` and `silver_quality_log`. Click a `*_checked` node → **Data quality**: rows failing each named rule (unknown store or item, negative stock, waste above available stock). Say: the pipeline declares *what* each table is; Databricks works out the order, retries and lineage.
 - **Runs** tab: open the latest run to show every task's duration and the notebook output behind it.
 - Schedule: every Monday 06:00 UTC, created paused. Say: in production this runs after the Sunday stock count; Lakeflow Connect would trigger it when new source data lands.
 - **Models**: Catalog → `grocery_intel` → `demand_forecaster`: the latest version (11) holds the alias `champion`, linked to its MLflow run. Scoring points at the alias, so a rollback is moving the alias back.
@@ -104,6 +105,7 @@ Walk it right to left:
 2. `gold_store_product_week` ← `silver_sales_weekly`, `silver_stock_snapshots`, `silver_waste_events`, `silver_products`, `silver_promotions`, `silver_stores`
 3. silver ← `bronze_pos_*` (Postgres POS), `bronze_erp_*` (MySQL ERP), `bronze_ops_waste_log` / `bronze_promo_calendar` (SaaS)
 4. bronze ← the raw extract files in the `raw` volume
+5. Click any bronze or silver table: the lineage panel names the **pipeline** that produces it; click a gold table: it names the **job** and the `03_gold` notebook. So every table answers "which process wrote me, and when".
 
 Then the documents chain: `gold_store_briefs` ← `silver_doc_chunks` ← `bronze_documents` + `bronze_document_files` ← the files in `raw/documents` and `raw/document_files`; the vector index `doc_chunks_index` hangs off `silver_doc_chunks`.
 
