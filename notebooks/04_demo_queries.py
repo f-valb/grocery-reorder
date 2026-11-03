@@ -1,166 +1,283 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # 04 Demo queries
-# MAGIC **Purpose:** answer the store manager's questions from the gold data product, one cell per question.
-# MAGIC **Inputs:** `gold_*`, `silver_quality_log`
-# MAGIC **Outputs:** printed results and charts (nothing written)
+# MAGIC **Purpose:** the end-to-end story for the business leader: three source systems → one store-item view → a trained forecast → next week's orders, with proof that it is right.
+# MAGIC **Inputs:** `bronze_*`, `silver_*`, `gold_*`, `gov_store_managers`
+# MAGIC **Outputs:** printed results and charts; `gold_execution_plan` (the captured query plan)
 
 # COMMAND ----------
 
 # Setup
+import io
+from contextlib import redirect_stdout
+
+from pyspark.sql import functions as F
+
+spark.sql("USE workspace.grocery_intel")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 1 Headline KPIs
+
+# COMMAND ----------
+
+# Headline numbers: availability and waste over the last 4 full weeks, next week's order, and who is forecasting
+display(spark.sql("""
+WITH recent AS (
+  SELECT * FROM gold_store_product_week
+  WHERE NOT is_partial_week AND week_num > (SELECT MAX(week_num) FROM gold_store_product_week WHERE NOT is_partial_week) - 4),
+model AS (SELECT MAX(champion_method) AS champion_method, MAX(model_version) AS model_version, MAX(gate_reason) AS gate_reason
+          FROM gold_model_monitor)
+SELECT ROUND(100 * SUM(days_in_stock) / SUM(period_days), 1) AS availability_pct_last_4w,
+       ROUND(SUM(waste_value)) AS waste_usd_last_4w,
+       (SELECT ROUND(SUM(order_value)) FROM gold_reorder_recommendation) AS next_week_order_usd,
+       (SELECT champion_method FROM model) AS forecast_method,
+       (SELECT gate_reason FROM model) AS why
+FROM recent"""))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 2 Answer each business question
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Q1. Did the three systems really come together?** Rows per source: landed in bronze, clean in silver, quarantined.
+
+# COMMAND ----------
+
+# Lineage in numbers: every source row is either in silver or in quarantine with a reason
+display(spark.sql("""
+WITH landed AS (
+  SELECT 'postgres_pos' AS source_system, 'pos_sales_weekly' AS source_table, COUNT(*) AS bronze_rows FROM bronze_pos_sales_weekly
+  UNION ALL SELECT 'postgres_pos', 'pos_stock_snapshots', COUNT(*) FROM bronze_pos_stock_snapshots
+  UNION ALL SELECT 'saas_store_ops', 'ops_waste_log', COUNT(*) FROM bronze_ops_waste_log
+  UNION ALL SELECT 'saas_promo_tool', 'promo_calendar', COUNT(*) FROM bronze_promo_calendar),
+clean AS (
+  SELECT 'pos_sales_weekly' AS source_table, COUNT(*) AS silver_rows FROM silver_sales_weekly
+  UNION ALL SELECT 'pos_stock_snapshots', COUNT(*) FROM silver_stock_snapshots
+  UNION ALL SELECT 'ops_waste_log', COUNT(*) FROM silver_waste_events
+  UNION ALL SELECT 'promo_calendar', COUNT(*) FROM silver_promotions),
+quarantined AS (SELECT source_table, COUNT(*) AS quarantined_rows FROM silver_quarantine GROUP BY source_table),
+fixed AS (SELECT table_name AS source_table, SUM(row_count) AS resends_removed FROM silver_quality_log
+          WHERE rule = 'exact_resend_removed' GROUP BY table_name)
+SELECT l.source_system, l.source_table, l.bronze_rows, c.silver_rows, COALESCE(q.quarantined_rows, 0) AS quarantined_rows,
+       COALESCE(f.resends_removed, 0) AS resends_removed,
+       l.bronze_rows - c.silver_rows - COALESCE(q.quarantined_rows, 0) - COALESCE(f.resends_removed, 0) AS unexplained_rows
+FROM landed l JOIN clean c USING (source_table)
+LEFT JOIN quarantined q USING (source_table) LEFT JOIN fixed f USING (source_table)
+ORDER BY l.source_system, l.source_table"""))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Q2. Which items run out most, and how much demand do raw sales hide?**
+
+# COMMAND ----------
+
+# SIGNAL: popular items with frequent stockouts; estimated demand vs raw sales shows the hidden (censored) demand
+display(spark.sql("""
+SELECT product_name, category, ROUND(100 * AVG(availability_pct), 1) AS availability_pct, SUM(stockout_days) AS stockout_days,
+       SUM(units_sold) AS units_sold, ROUND(SUM(est_demand)) AS est_demand,
+       ROUND(100 * (SUM(est_demand) / SUM(units_sold) - 1), 1) AS hidden_demand_pct
+FROM gold_store_product_week WHERE NOT is_partial_week
+GROUP BY product_name, category ORDER BY availability_pct LIMIT 6"""))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Q3. Where does waste come from: which items, and which store?**
+
+# COMMAND ----------
+
+# SIGNAL: over-ordered fresh produce, and the store that chronically over-orders (ST-07)
+display(spark.sql("""
+SELECT product_name, SUM(received) AS received, SUM(expired_units) AS expired_units,
+       ROUND(100 * SUM(expired_units) / SUM(received), 1) AS expired_pct_of_received, ROUND(SUM(waste_value)) AS waste_usd
+FROM gold_store_product_week WHERE perishable AND NOT is_partial_week
+GROUP BY product_name ORDER BY expired_pct_of_received DESC LIMIT 5"""))
+display(spark.sql("""
+SELECT store_id, store_name, store_size, ROUND(SUM(waste_value)) AS waste_usd,
+       ROUND(SUM(waste_value) / AVG(SUM(waste_value)) OVER (), 2) AS waste_vs_avg_store,
+       ROUND(SUM(received) / SUM(est_demand), 2) AS received_vs_demand
+FROM gold_store_product_week WHERE NOT is_partial_week
+GROUP BY store_id, store_name, store_size ORDER BY waste_usd DESC LIMIT 5"""))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Q4. Does the trained model beat the simple forecast?** Same backtest weeks, same inputs; error = WAPE (total absolute error / total demand).
+
+# COMMAND ----------
+
+# The champion decision in numbers: error by method, overall, in promo weeks and in normal weeks
+display(spark.sql("""
+SELECT slice,
+       MAX(CASE WHEN method = 'baseline' THEN wape END) AS wape_baseline,
+       MAX(CASE WHEN method = 'model' THEN wape END) AS wape_model,
+       MAX(CASE WHEN method = 'baseline' THEN sim_stockout_days END) AS stockout_days_baseline,
+       MAX(CASE WHEN method = 'model' THEN sim_stockout_days END) AS stockout_days_model,
+       MAX(store_product_weeks) AS store_product_weeks
+FROM gold_backtest_summary WHERE slice IN ('TOTAL', 'Promo weeks', 'Non-promo weeks')
+GROUP BY slice ORDER BY slice"""))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Q5. What should ST-07 order next week, and why?**
+
+# COMMAND ----------
+
+# Reorder list for one store: the quantity, the numbers behind it, and the reason in plain English
+display(spark.sql("""
+SELECT product_name, ROUND(forecast_units) AS forecast, ROUND(safety_stock) AS safety_stock, on_hand, on_order,
+       ROUND(on_hand_at_arrival) AS on_hand_at_arrival, case_pack, order_cases, order_units, order_value, reason
+FROM gold_reorder_recommendation WHERE store_id = 'ST-07' ORDER BY order_value DESC LIMIT 12"""))
+display(spark.sql("""
+SELECT regexp_extract(reason, '^([^:(]+)', 1) AS reason_type, COUNT(*) AS store_items, SUM(order_units) AS order_units
+FROM gold_reorder_recommendation GROUP BY 1 ORDER BY store_items DESC"""))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Q6. Would these orders have cut stockouts and waste?** Backtest on the last 2 full weeks: what actually happened vs the recommendation from each method.
+
+# COMMAND ----------
+
+# Dollars: waste at cost plus lost sales margin, actual vs each method, and the net saving
+display(spark.sql("""
+SELECT slice, method, actual_waste_usd, sim_waste_usd, actual_lost_margin_usd, sim_lost_margin_usd,
+       (actual_waste_usd + actual_lost_margin_usd) - (sim_waste_usd + sim_lost_margin_usd) AS net_saving_usd
+FROM gold_backtest_summary
+WHERE slice IN ('TOTAL', 'Non-perishable', 'Perishable, shelf life <= 7d', 'Perishable, shelf life > 7d')
+ORDER BY slice, method"""))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Q7. Is the model healthy, and can a manager see only their own store?**
+
+# COMMAND ----------
+
+# Model health: drift per input (PSI), gate result, retrain flag
+display(spark.sql("SELECT check_name, value, threshold, alert, champion_method, model_version, retrain_needed FROM gold_model_monitor"))
+
+# COMMAND ----------
+
+# Governance: rows each role would see under the row filter (same predicate as gov_store_filter, evaluated per user)
+display(spark.sql("""
+SELECT g.user_email, g.role, g.store_id AS allowed_store, COUNT(r.store_id) AS reorder_rows_visible
+FROM gov_store_managers g
+LEFT JOIN gold_reorder_recommendation r ON g.store_id = 'ALL' OR r.store_id = g.store_id
+WHERE g.role != 'store_manager' OR g.store_id IN ('ST-07', 'ST-12')
+GROUP BY g.user_email, g.role, g.store_id ORDER BY g.role, g.user_email"""))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3 Chart
+
+# COMMAND ----------
+
+# Chart: backtest dollars by method (headline result) and forecast error by method
 import matplotlib.pyplot as plt
 
-spark.sql("USE workspace.grocery_reorder")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 1. Which items run out most, and how much demand do raw sales hide?
-
-# COMMAND ----------
-
-# SIGNAL: popular items with frequent stockouts; estimated demand vs raw sales shows the censored demand
-display(spark.sql("""
-SELECT product_name, category,
-       round(avg(availability_pct) * 100, 1) AS availability_pct,
-       sum(stockout_days) AS stockout_days,
-       sum(units_sold) AS units_sold,
-       round(sum(est_demand)) AS est_demand,
-       round((sum(est_demand) / sum(units_sold) - 1) * 100, 1) AS hidden_demand_pct
-FROM gold_store_product_week
-WHERE NOT is_partial_week
-GROUP BY ALL ORDER BY availability_pct LIMIT 8"""))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 2. Where does waste come from: which items, and which store?
-
-# COMMAND ----------
-
-# SIGNAL: over-ordered fresh produce (waste as a share of what was received)
-display(spark.sql("""
-SELECT product_name, category, sum(received) AS received, sum(waste_units) AS waste_units,
-       round(sum(waste_units) / sum(received) * 100, 1) AS waste_pct_of_received, round(sum(waste_value)) AS waste_usd
-FROM gold_store_product_week WHERE perishable AND NOT is_partial_week
-GROUP BY ALL ORDER BY waste_pct_of_received DESC LIMIT 6"""))
-
-# COMMAND ----------
-
-# SIGNAL: the store that chronically over-orders: receives more than its demand and wastes ~2x the average
-display(spark.sql("""
-SELECT store_id, store_size,
-       round(sum(waste_value)) AS waste_usd,
-       round(sum(waste_value) / avg(sum(waste_value)) OVER (), 2) AS waste_vs_avg_store,
-       round(sum(received) / sum(est_demand), 2) AS received_vs_demand
-FROM gold_store_product_week WHERE NOT is_partial_week
-GROUP BY ALL ORDER BY waste_usd DESC LIMIT 5"""))
-
-# COMMAND ----------
-
-# Chart: waste $ per store (S07 stands out)
-waste_by_store = spark.sql("""
-SELECT store_id, sum(waste_value) AS waste_usd FROM gold_store_product_week GROUP BY 1 ORDER BY 1""").toPandas()
-fig, ax = plt.subplots(figsize=(10, 3.5))
-ax.bar(waste_by_store.store_id, waste_by_store.waste_usd,
-       color=["#D55E00" if s == "S07" else "#0072B2" for s in waste_by_store.store_id])
-ax.axhline(waste_by_store.waste_usd.mean(), color="grey", linestyle="--", label="average store")
-ax.set_title("Waste $ per store, 12 weeks"); ax.set_ylabel("USD at cost"); ax.legend()
+summary = spark.sql("SELECT slice, method, wape, sim_waste_usd, sim_lost_margin_usd, actual_waste_usd, actual_lost_margin_usd "
+                    "FROM gold_backtest_summary WHERE slice IN ('TOTAL', 'Promo weeks', 'Non-promo weeks')").toPandas()
+total = summary[summary.slice == "TOTAL"].set_index("method")
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+labels = ["Actual", "Baseline orders", "Model orders"]
+waste = [total.actual_waste_usd.iloc[0], total.loc["baseline", "sim_waste_usd"], total.loc["model", "sim_waste_usd"]]
+lost = [total.actual_lost_margin_usd.iloc[0], total.loc["baseline", "sim_lost_margin_usd"], total.loc["model", "sim_lost_margin_usd"]]
+ax1.bar(labels, waste, label="Waste $ (at cost)", color="#D55E00")
+ax1.bar(labels, lost, bottom=waste, label="Lost sales margin $", color="#0072B2")
+ax1.set_title("Backtest, last 2 full weeks: waste + lost margin"); ax1.set_ylabel("USD"); ax1.legend()
+err = summary.pivot(index="slice", columns="method", values="wape").loc[["Non-promo weeks", "Promo weeks", "TOTAL"]]
+err.plot.bar(ax=ax2, color=["#999999", "#0072B2"], rot=0)
+ax2.set_title("Forecast error (WAPE) by method"); ax2.set_ylabel("WAPE")
 display(fig)
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## 3. What should store S07 order next week, and why?
-
-# COMMAND ----------
-
-# Reorder list for one store: quantity, the numbers behind it, and the reason in plain English
+# Weekly demand by category: the Plant-based trend the forecast picks up
 display(spark.sql("""
-SELECT product_name, category, round(forecast_units) AS forecast, round(safety_stock) AS safety_stock,
-       on_hand, on_order, round(on_hand_at_arrival) AS on_hand_at_arrival, case_pack, order_cases, order_units,
-       order_value, reason
-FROM gold_reorder_recommendation WHERE store_id = 'S07'
-ORDER BY order_value DESC"""))
-
-# COMMAND ----------
-
-# Why the list looks the way it does across the chain: how many items fall under each reason
-display(spark.sql("""
-SELECT regexp_extract(reason, '^([^:(]+)', 1) AS reason_type, count(*) AS store_products,
-       sum(order_units) AS order_units, round(sum(order_value)) AS order_value_usd
-FROM gold_reorder_recommendation GROUP BY 1 ORDER BY store_products DESC"""))
+SELECT week_start, category, ROUND(SUM(est_demand)) AS est_demand FROM gold_store_product_week
+WHERE NOT is_partial_week AND NOT is_promo AND NOT is_spike_week GROUP BY week_start, category ORDER BY week_start, category"""))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. How good is the forecast, and would the recommendations have cut stockouts and waste?
+# MAGIC ## 4 Data product check (grain, freshness, quality)
 
 # COMMAND ----------
 
-# Backtest summary on the last 2 full weeks: forecast error and outcomes vs what actually happened
+# QUALITY: grain: each gold table has exactly one row per its stated key
 display(spark.sql("""
-SELECT slice, wape_forecast, wape_naive_raw_sales,
-       actual_stockout_days, sim_stockout_days, actual_waste_units, sim_waste_units,
-       actual_waste_usd, sim_waste_usd, actual_lost_margin_usd, sim_lost_margin_usd,
-       (actual_waste_usd + actual_lost_margin_usd) - (sim_waste_usd + sim_lost_margin_usd) AS net_saving_usd
-FROM gold_backtest_summary"""))
+SELECT 'gold_store_product_week' AS table_name, 'store x product x week' AS grain, COUNT(*) AS row_count,
+       COUNT(DISTINCT store_id, item_id, week_start) AS distinct_keys FROM gold_store_product_week
+UNION ALL SELECT 'gold_demand_forecast', 'store x product', COUNT(*), COUNT(DISTINCT store_id, item_id) FROM gold_demand_forecast
+UNION ALL SELECT 'gold_reorder_recommendation', 'store x product', COUNT(*), COUNT(DISTINCT store_id, item_id) FROM gold_reorder_recommendation
+UNION ALL SELECT 'gold_backtest', 'method x store x product x week', COUNT(*), COUNT(DISTINCT method, store_id, item_id, week_start) FROM gold_backtest"""))
 
 # COMMAND ----------
 
-# Chart: waste $ and lost margin $, actual vs recommendation, per product segment
-bt = spark.sql("""SELECT slice, actual_waste_usd, sim_waste_usd, actual_lost_margin_usd, sim_lost_margin_usd
-                  FROM gold_backtest_summary WHERE slice NOT LIKE '20%' AND slice != 'TOTAL'""").toPandas()
-fig, axes = plt.subplots(1, 2, figsize=(12, 3.8), sharey=True)
-for ax, (metric, title) in zip(axes, [("waste_usd", "Waste $ (at cost)"), ("lost_margin_usd", "Lost sales margin $")]):
-    x = range(len(bt))
-    ax.bar([i - 0.2 for i in x], bt[f"actual_{metric}"], width=0.4, label="actual", color="#999999")
-    ax.bar([i + 0.2 for i in x], bt[f"sim_{metric}"], width=0.4, label="with recommendation", color="#0072B2")
-    ax.set_xticks(list(x)); ax.set_xticklabels(bt.slice, fontsize=8); ax.set_title(title); ax.legend()
-fig.suptitle("Backtest, last 2 full weeks")
-display(fig)
+# QUALITY: freshness, consistency and planted-signal checks written by gold
+display(spark.sql("SELECT check_name, value, passed FROM gold_quality_check ORDER BY check_name"))
+display(spark.sql("SELECT signal_name, ROUND(value, 3) AS value, low, high, passed FROM gold_signal_check ORDER BY signal_name"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. What does a promo do to sales, and which category is trending up?
+# MAGIC **Rerun check (idempotency):** rerunning gold must not change its data. Compare the last two *data writes* in the Delta history.
+# MAGIC COMMENT, ALTER and row-filter statements also create versions, so "latest − 1" would compare a table with itself and always pass: only write operations are used.
 
 # COMMAND ----------
 
-# SIGNAL: promo lift on promoted products (promo weeks vs their normal weeks)
-display(spark.sql("""
-SELECT product_name,
-       round(avg(CASE WHEN is_promo THEN units_sold END)) AS avg_units_promo_week,
-       round(avg(CASE WHEN NOT is_promo THEN units_sold END)) AS avg_units_normal_week,
-       round(avg(CASE WHEN is_promo THEN units_sold END) / avg(CASE WHEN NOT is_promo THEN units_sold END), 2) AS promo_lift
-FROM gold_store_product_week
-WHERE product_id IN (SELECT product_id FROM silver_promotions) AND NOT is_partial_week
-GROUP BY ALL ORDER BY promo_lift DESC"""))
-
-# COMMAND ----------
-
-# SIGNAL: category trend: forecast trend as % of demand per week, and weekly demand per category
-display(spark.sql("""
-SELECT p.category, round(avg(f.trend_per_week / f.forecast_units) * 100, 1) AS trend_pct_per_week
-FROM gold_demand_forecast f JOIN silver_products p USING (product_id)
-GROUP BY 1 ORDER BY 2 DESC"""))
-
-trend = spark.sql("""
-SELECT week_start, category, sum(est_demand) AS est_demand
-FROM gold_store_product_week WHERE NOT is_partial_week AND NOT is_promo GROUP BY 1, 2 ORDER BY 1""").toPandas()
-fig, ax = plt.subplots(figsize=(10, 3.5))
-for cat, g in trend.groupby("category"):
-    ax.plot(g.week_start, g.est_demand, marker="o", linewidth=3 if cat == "Plant-based" else 1.2, label=cat)
-ax.set_title("Weekly estimated demand by category (non-promo)"); ax.set_ylabel("units"); ax.legend(fontsize=8, ncol=3)
-display(fig)
+# QUALITY: idempotency: the last two data writes of a gold table hold exactly the same rows (exceptAll both ways)
+# SPARK: Delta time travel (versionAsOf) reads an older snapshot of the same table
+for table in ["gold_store_product_week", "gold_reorder_recommendation"]:
+    writes = (spark.sql(f"DESCRIBE HISTORY {table}")
+              .where(F.col("operation").isin("CREATE OR REPLACE TABLE AS SELECT", "WRITE", "CREATE TABLE AS SELECT"))
+              .orderBy(F.col("version").desc()).limit(2).collect())
+    if len(writes) < 2:
+        print(f"{table}: only {len(writes)} data write so far: rerun 03_gold, then this check")
+        continue
+    newer, older = (spark.read.option("versionAsOf", w.version).table(table) for w in writes)
+    added, removed = newer.exceptAll(older).count(), older.exceptAll(newer).count()
+    print(f"{table}: versions {writes[1].version} -> {writes[0].version}: {added} rows added, {removed} removed "
+          f"-> {'IDEMPOTENT' if added == removed == 0 else 'CHANGED'}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. Can we trust the data?
+# MAGIC ## 5 Execution plan
+# MAGIC The main join + aggregate behind the waste-by-store question: weekly sales joined to the product price version valid that week, then grouped by store and category.
+# MAGIC Print output is lost in jobs, so the plan text is written to `gold_execution_plan` and read back.
 
 # COMMAND ----------
 
-# QUALITY: rows quarantined or fixed per rule, and the gold freshness/consistency checks
-display(spark.sql("SELECT table_name, rule, row_count FROM silver_quality_log ORDER BY 1, 2"))
-display(spark.sql("SELECT check_name, value, passed FROM gold_quality_check"))
+# SPARK: capture the formatted physical plan of the main join + aggregate
+waste_by_store_category = spark.sql("""
+SELECT s.store_id, p.category, SUM(s.units_sold * p.unit_price) AS revenue, COUNT(*) AS store_item_weeks
+FROM silver_sales_weekly s
+JOIN silver_products p ON p.item_id = s.item_id AND s.week_start BETWEEN p.valid_from AND p.valid_to
+GROUP BY s.store_id, p.category""")
+plan_text = io.StringIO()
+with redirect_stdout(plan_text):
+    waste_by_store_category.explain("formatted")
+waste_by_store_category.collect()  # run it once so AQE has executed the plan
+spark.createDataFrame([(i, line) for i, line in enumerate(plan_text.getvalue().splitlines())], "line_no INT, plan_line STRING") \
+    .write.mode("overwrite").option("overwriteSchema", True).saveAsTable("gold_execution_plan")
+display(spark.table("gold_execution_plan").orderBy("line_no"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Reading the plan, in plain English**
+# MAGIC - **Join strategy: broadcast hash join.** The products table (46 price versions) is far below the broadcast threshold, so Spark copies it to every task and joins on `item_id`; the "price valid that week" range check runs as a filter inside the join. No shuffle of the 9,680 sales rows is needed for the join. On serverless the node is `PhotonBroadcastHashJoin`.
+# MAGIC - **Exchange (shuffle):** there is one, between the two aggregates: rows are hash-partitioned by `store_id, category` so every store-category ends up in one partition. Plus a `BroadcastExchange` that ships the small products table.
+# MAGIC - **Partial vs final HashAggregate:** each task first sums its own rows per store-category (partial), so only one small row per group per task crosses the network; after the shuffle a final aggregate adds those partial sums up. On serverless: `PhotonGroupingAgg` partial → final merge.
+# MAGIC - **AQE (adaptive query execution):** the plan is wrapped in `AdaptiveSparkPlan`; at run time AQE coalesces the shuffle partitions to a handful (the data is tiny) and could switch a sort-merge join to a broadcast join if a side turned out small. `isFinalPlan=false` in the printed plan only means it was printed before execution.
+# MAGIC - **At TB scale:** the products dimension still broadcasts (thousands of rows), but sales would be partitioned or liquid-clustered by `week_start` so a week filter prunes files; a skewed store (one huge flagship) would be handled by AQE skew-join splitting or salting the key; a large-to-large join (sales to snapshots) would become a sort-merge join with a shuffle on both sides.

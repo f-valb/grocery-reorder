@@ -1,9 +1,9 @@
-"""05 Dashboard: build the store manager AI/BI dashboard and create/update + publish it in the workspace.
+"""05 Dashboard: build the store manager AI/BI dashboard (v2: grocery_intel, with the model panel) and create/update + publish it.
 
     DATABRICKS_CONFIG_PROFILE=food WAREHOUSE_ID=5d7ed27d256c7dcf python3 dashboards/build_dashboard.py
 
 Widget helpers come from templates/dashboards/build_dashboards.py. The dashboard id is kept in
-dashboards/dashboard_id.txt so reruns update the same dashboard. Prints the dashboard URL.
+dashboards/dashboard_id_intel.txt so reruns update the same dashboard (v1 keeps dashboard_id.txt). Prints the dashboard URL.
 """
 
 import importlib.util
@@ -18,7 +18,7 @@ kit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(kit)
 ds, text, counter, chart, table, multi_filter = kit.ds, kit.text, kit.counter, kit.chart, kit.table, kit.multi_filter
 
-S = "workspace.grocery_reorder"
+S = "workspace.grocery_intel"
 PCT = {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 1}}
 LAST_4_WEEKS = f"""week_num > (SELECT max(week_num) FROM {S}.gold_store_product_week WHERE NOT is_partial_week) - 4
   AND NOT is_partial_week"""
@@ -49,7 +49,19 @@ SELECT store_id, week_start, sum(days_in_stock) AS days_in_stock, sum(period_day
   sum(waste_value) AS waste_value, sum(revenue) AS revenue
 FROM {S}.gold_store_product_week WHERE NOT is_partial_week GROUP BY ALL"""),
     ]
-    all_ds = [d["name"] for d in datasets]
+    all_ds = [d["name"] for d in datasets]  # the store filter applies to these (chain-level datasets below have no store_id)
+    datasets += [
+        ds("ds_model_error", "Forecast error by method (backtest)", f"""
+SELECT slice, method, wape FROM {S}.gold_backtest_summary WHERE slice IN ('TOTAL', 'Promo weeks', 'Non-promo weeks')"""),
+        ds("ds_model_monitor", "Model health", f"""
+SELECT check_name, value, threshold, alert, champion_method, model_version, retrain_needed FROM {S}.gold_model_monitor"""),
+        ds("ds_sources", "Rows per source system", f"""
+SELECT 'postgres_pos' AS source_system, 'pos_sales_weekly' AS source_table, count(*) AS bronze_rows FROM {S}.bronze_pos_sales_weekly
+UNION ALL SELECT 'postgres_pos', 'pos_stock_snapshots', count(*) FROM {S}.bronze_pos_stock_snapshots
+UNION ALL SELECT 'mysql_erp', 'erp_products', count(*) FROM {S}.bronze_erp_products
+UNION ALL SELECT 'saas_store_ops', 'ops_waste_log', count(*) FROM {S}.bronze_ops_waste_log
+UNION ALL SELECT 'saas_promo_tool', 'promo_calendar', count(*) FROM {S}.bronze_promo_calendar"""),
+    ]
     layout = [
         text("title", ["## Store manager: availability, waste and next week's orders\n"], 0, 0, 12, 1),
         text("subtitle", ["Counters and top lists cover the last 4 full weeks. Reorder = forecast + safety stock − stock at "
@@ -74,6 +86,17 @@ FROM {S}.gold_store_product_week WHERE NOT is_partial_week GROUP BY ALL"""),
               "availability", "SUM(`days_in_stock`) / SUM(`period_days`)", "Availability", fmt=PCT, x=0, y=22, w=6, h=6),
         chart("bar_waste", "bar", "Weekly waste $", "ds_trend", "week_start", "`week_start`", "temporal",
               "sum(waste_value)", "SUM(`waste_value`)", "Waste $", fmt=kit.USD, x=6, y=22, w=6, h=6),
+        text("model_title", ["## Forecast model (chain level)\n"], 0, 28, 12, 1),
+        chart("bar_model_error", "bar", "Forecast error (WAPE): trained model vs simple baseline", "ds_model_error", "slice",
+              "`slice`", "categorical", "avg(wape)", "AVG(`wape`)", "WAPE", color=("method", "`method`"), fmt=PCT,
+              description="Backtest on the last 2 full weeks; the model is champion only if it wins", x=0, y=29, w=6, h=6,
+              layout="group"),
+        table("tbl_monitor", "Model health: drift (PSI) and gate", "ds_model_monitor",
+              [("check_name", "Check"), ("value", "Value"), ("threshold", "Threshold"), ("alert", "Alert"),
+               ("champion_method", "Champion"), ("model_version", "Version"), ("retrain_needed", "Retrain needed")],
+              x=6, y=29, w=6, h=6),
+        table("tbl_sources", "Rows landed per source system", "ds_sources",
+              [("source_system", "Source system"), ("source_table", "Table"), ("bronze_rows", "Rows")], x=0, y=35, w=12, h=4),
     ]
     return {"datasets": datasets, "pages": [{"name": "store", "displayName": "Store manager", "pageType": "PAGE_TYPE_CANVAS",
                                              "layoutVersion": "GRID_V1", "layout": layout}], "uiSettings": {"theme": kit.THEME}}
@@ -88,12 +111,12 @@ def cli(*args):
 
 if __name__ == "__main__":
     body = dashboard()
-    (HERE / "store_manager.lvdash.json").write_text(json.dumps(body, indent=1) + "\n")
+    (HERE / "grocery_intel.lvdash.json").write_text(json.dumps(body, indent=1) + "\n")
     warehouse = os.environ["WAREHOUSE_ID"]
     user = cli("current-user", "me")["userName"]
-    payload = {"display_name": "Grocery store manager: stock, waste, reorder", "warehouse_id": warehouse,
+    payload = {"display_name": "Grocery intelligence: stock, waste, forecast, reorder", "warehouse_id": warehouse,
                "serialized_dashboard": json.dumps(body), "parent_path": f"/Users/{user}/{HERE.parent.name}"}
-    id_file = HERE / "dashboard_id.txt"
+    id_file = HERE / "dashboard_id_intel.txt"
     if id_file.exists():
         dash = cli("lakeview", "update", id_file.read_text().strip(), "--json", json.dumps(payload))
     else:
