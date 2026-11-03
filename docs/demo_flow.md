@@ -24,44 +24,50 @@ Click **Show code** on one answer: the SQL is readable and auditable. If Genie a
 **Optional, if they ask about trust:** "How many rows did we quarantine per rule?" (reads `silver_quality_log`).
 
 ### 1b. Documents: vector search finds the *why* (4 min)
-Genie answers **what** from tables. The **why** is in documents: supplier contracts, the fresh SOP, area-manager visit notes, promo briefs, customer feedback (24 documents in the `raw/documents` volume).
+Genie answers **what** from tables. The **why** is in documents: supplier contracts, the fresh SOP, area-manager visit notes, promo briefs, customer feedback, a delivery note. 25 documents in the `raw` volume, in four formats: the Coffee contract is a **PDF**, the ST-07 visit note a **Word** file, the delivery note a **photo (PNG)**, the rest markdown. Open the three real files in the volume (Catalog → `grocery_intel` → `raw` → `document_files`) before you start: "this is what the business actually has".
 
 **Process to explain** (notebook `05_documents_rag`):
-1. Files land in the volume → `bronze_documents`
-2. Chunked by section (short notes stay whole) → `silver_doc_chunks` (39 chunks, with doc type / store / product metadata)
-3. Vector Search index `doc_chunks_index` on endpoint `grocery_docs_vs` embeds every chunk with `databricks-gte-large-en` and re-syncs when the table changes
-4. A question is embedded the same way; the closest chunks come back with a score
-5. Llama 3.3 70B answers **only** from those chunks plus the gold numbers, citing `[doc_name]`
+1. Files land in the volume → `bronze_documents` (text files) and `bronze_document_files` (PDF, Word, images as bytes)
+2. Parsed into text with their structure (`silver_document_parse_log` shows each file, method and word count):
+   - PDF → `pypdf`, page by page, so answers cite the page
+   - Word → the .docx XML, by heading
+   - Image → Llama 4 Maverick reads the photo (OCR by a vision model)
+   - On a paid workspace, `ai_parse_document` does all three in one SQL function; on Free Edition it isn't available, so the notebook parses in Python
+3. Chunked by section or PDF page (short notes stay whole) → `silver_doc_chunks` (38 chunks, with format / doc type / store / product metadata)
+4. Vector Search index `doc_chunks_index` on endpoint `grocery_docs_vs` embeds every chunk with `databricks-gte-large-en` and re-syncs when the table changes
+5. A question is embedded the same way; the closest chunks come back with a score
+6. Llama 3.3 70B answers **only** from those chunks plus the gold numbers, citing `[doc_name]`
 
 **Live in the SQL editor:**
 ```sql
-SELECT doc_name, section, ROUND(search_score, 3) AS score
+SELECT doc_name, source_format, section, ROUND(search_score, 3) AS score
 FROM vector_search(index => 'workspace.grocery_intel.doc_chunks_index',
-                   query_text => 'why do we keep running out of coffee', num_results => 3);
+                   query_text => 'why does our coffee supplier deliver less than we order', num_results => 3);
 ```
-Expect `supplier_coffee`: Allocation (clause 4.1), then Emergency orders (clause 4.2).
+Expect three formats in one result: `delivery_note_st07_2026_10_12.png` (the photo), then `supplier_coffee.pdf` Page 2 and Page 1. Say: "the photo of a delivery note and a PDF contract, searched by meaning, no keywords".
 
 Then retrieval + generation in one statement:
 ```sql
 WITH passages AS (
   SELECT doc_name, chunk_text FROM vector_search(index => 'workspace.grocery_intel.doc_chunks_index',
-    query_text => 'Why do we keep running out of coffee, and what can we do?', num_results => 4)),
+    query_text => 'Why does our coffee supplier deliver less than we order, and what can we do?', num_results => 4)),
 context AS (SELECT concat_ws('\n', collect_list(concat('[', doc_name, '] ', chunk_text))) AS passages FROM passages)
 SELECT ai_query('databricks-meta-llama-3-3-70b-instruct',
   concat('Answer only from these passages and cite each one you use as [doc_name]. At most 80 words.\n', passages,
-         '\nQuestion: Why do we keep running out of coffee, and what can we do?')) AS answer
+         '\nQuestion: Why does our coffee supplier deliver less than we order, and what can we do?')) AS answer
 FROM context;
 ```
-Expect: allocation limits [supplier_coffee]; request a higher allocation / emergency order.
+Expect: the order was cut back to the allocation (clause 4.1) [delivery_note…png, supplier_coffee.pdf]; emergency order or higher allocation.
 
 **Pre-computed grounded answers** (numbers + documents): `SELECT store_id, question, answer, source_documents FROM workspace.grocery_intel.gold_doc_answers`:
-- ST-07 Coffee: capped at 70% of ~134 units a week (≈94); emergency order up to 30% (≈28 units) at +8%, or ask for a higher allocation with 4 weeks of evidence
-- ST-07 waste: the manager orders ~50% above the system suggestion on fresh lines; Sourdough $532, Muffins $424 wasted
+- ST-07 Coffee: allocation capped at 70% [supplier_coffee.pdf, page 2]; emergency order or a higher allocation with 4 weeks of evidence
+- ST-07 delivery, week of 2026-10-12: ordered 264, received 96, cut back per clause 4.1 [delivery_note_st07_2026_10_12.png] + [supplier_coffee.pdf, page 2]: the photo and the contract tell one story
+- ST-07 waste: the manager orders ~50% above the system suggestion on fresh lines [visit_st07_2026_09.docx]; Sourdough $532, Muffins $424 wasted
 - ST-12 week of 2026-09-07: Bayside Summer Festival, one-off: don't raise standing drink orders
 
 Back in Genie: *"Show me the weekly brief for ST-07 and the documents it cites"* returns the generated brief with its sources.
 
-Talking point: the documents are governed like the tables (volume, Delta tables and index all in Unity Catalog); retrieval is checked (`gold_rag_check`: 5 of 5 demo questions found the document that holds the answer); every answer cites its source.
+Talking point: the documents are governed like the tables (volume, Delta tables and index all in Unity Catalog); retrieval is checked (`gold_rag_check`: 6 of 6 demo questions found the document that holds the answer, including the PDF, Word and image); every answer cites its source.
 
 ---
 
@@ -90,7 +96,7 @@ Walk it right to left:
 3. silver ← `bronze_pos_*` (Postgres POS), `bronze_erp_*` (MySQL ERP), `bronze_ops_waste_log` / `bronze_promo_calendar` (SaaS)
 4. bronze ← the raw extract files in the `raw` volume
 
-Then the documents chain: `gold_store_briefs` ← `silver_doc_chunks` ← `bronze_documents` ← the files in `raw/documents`; the vector index `doc_chunks_index` hangs off `silver_doc_chunks`.
+Then the documents chain: `gold_store_briefs` ← `silver_doc_chunks` ← `bronze_documents` + `bronze_document_files` ← the files in `raw/documents` and `raw/document_files`; the vector index `doc_chunks_index` hangs off `silver_doc_chunks`.
 
 Then:
 - Click `gold_store_product_week` → **Columns** → `est_demand`: column-level lineage back to `units_sold` and `days_in_stock`.

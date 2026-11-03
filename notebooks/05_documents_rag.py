@@ -3,9 +3,14 @@
 # MAGIC # 05 Documents: vector search and generated answers
 # MAGIC **Purpose:** put the chain's documents to work. Supplier agreements, SOPs, store visit notes, promo briefs and customer feedback are chunked, embedded and indexed with Databricks Vector Search; an LLM answers "why" questions with the gold numbers plus the retrieved passages, citing its sources, and writes a weekly brief per store.
 # MAGIC **Inputs:** `silver_*` and `gold_*` (to keep the documents consistent with the data), the documents written in section 1
-# MAGIC **Outputs:** files in `/Volumes/workspace/grocery_intel/raw/documents/`, `bronze_documents`, `silver_doc_chunks`, vector index `doc_chunks_index`, `gold_doc_answers`, `gold_store_briefs`, `gold_rag_check`
+# MAGIC **Outputs:** files in `/Volumes/workspace/grocery_intel/raw/documents/`, `bronze_documents`, `bronze_document_files`, `silver_document_parse_log`, `silver_doc_chunks`, vector index `doc_chunks_index`, `gold_doc_answers`, `gold_store_briefs`, `gold_rag_check`
 # MAGIC
 # MAGIC The documents are mocked (the brief allows it) but built from the same stores, products, promos and price changes as the structured data, so text and numbers tell one story.
+# MAGIC Three of them arrive in real formats, uploaded to `raw/document_files/` (made by `scripts/make_source_files.py`): the Coffee contract as a **PDF**, the ST-07 visit note as a **Word** file and a photographed **delivery note** (PNG).
+
+# COMMAND ----------
+
+# MAGIC %pip install pypdf==5.1.0 --quiet
 
 # COMMAND ----------
 
@@ -27,10 +32,13 @@ from pyspark.sql import functions as F
 spark.sql("USE workspace.grocery_intel")
 IS_DATABRICKS = "DATABRICKS_RUNTIME_VERSION" in os.environ
 DOC_DIR = os.path.join(os.environ.get("RAW_DIR", "/Volumes/workspace/grocery_intel/raw"), "documents")
+FILES_DIR = os.path.join(os.environ.get("RAW_DIR", "/Volumes/workspace/grocery_intel/raw"), "document_files")
+REAL_FORMAT_DOCS = {"supplier_coffee", "visit_st07_2026_09"}  # these arrive as PDF / Word files instead of markdown
 VS_ENDPOINT = "grocery_docs_vs"
 INDEX_NAME = "workspace.grocery_intel.doc_chunks_index"
 EMBEDDING_MODEL = "databricks-gte-large-en"
 LLM = "databricks-meta-llama-3-3-70b-instruct"
+VISION_LLM = "databricks-llama-4-maverick"  # reads text from images (OCR); ai_parse_document is not available on Free Edition
 TOP_K = 4
 
 # COMMAND ----------
@@ -147,7 +155,12 @@ for store_id, comments in feedback.items():
         ("Top comments", "\n".join(f"- {c}" for c in comments)),
     ]))
 
-# Write every document as a markdown file into the volume (overwrite = idempotent)
+# Write every document as a markdown file into the volume (overwrite = idempotent); real-format documents are skipped
+documents = [(p, txt) for p, txt in documents if os.path.basename(p).removesuffix(".md") not in REAL_FORMAT_DOCS]
+for name in REAL_FORMAT_DOCS:  # remove markdown copies left by earlier runs
+    for folder in ("supplier_agreement", "store_visit"):
+        if os.path.exists(f"{DOC_DIR}/{folder}/{name}.md"):
+            os.remove(f"{DOC_DIR}/{folder}/{name}.md")
 for rel_path, text in documents:
     os.makedirs(os.path.dirname(f"{DOC_DIR}/{rel_path}"), exist_ok=True)
     with open(f"{DOC_DIR}/{rel_path}", "w") as fh:
@@ -170,6 +183,14 @@ bronze_docs.write.mode("overwrite").option("overwriteSchema", True).saveAsTable(
 
 # COMMAND ----------
 
+# Real-format files (PDF, Word, images) land as bytes: one row per file with its content, size and modified time
+bronze_files = (spark.read.format("binaryFile").option("recursiveFileLookup", True).load(FILES_DIR)
+                .select(F.col("path").alias("source_file"), "content", "length", "modificationTime")
+                .withColumn("_source_system", F.lit("document_store")).withColumn("_ingested_at", F.current_timestamp()))
+bronze_files.write.mode("overwrite").option("overwriteSchema", True).saveAsTable("bronze_document_files")
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## 3 Silver: chunk by section, keep metadata for filtering and citing
 # MAGIC One chunk per `##` section, prefixed with the document title so each chunk makes sense on its own; short documents (up to 110 words) stay whole. Metadata (doc type, store, product) comes from the front matter.
@@ -179,32 +200,121 @@ bronze_docs.write.mode("overwrite").option("overwriteSchema", True).saveAsTable(
 MAX_WHOLE_DOC_WORDS = 110
 
 
-# RULE: chunk = document title + one section; chunk_id is a hash of file + section, so reruns produce the same ids
+# RULE: chunk = document title + one section (or one PDF page); chunk_id is a hash of file + position, so reruns keep ids
 # TRAP: short documents stay one chunk: split into tiny sections, the cause ("orders 50% above the system") ranked 8th
-def chunk(source_file, content):
+def make_chunks(source_file, title, meta, sections, source_format):
+    if sum(len(text.split()) for _, text in sections) <= MAX_WHOLE_DOC_WORDS:
+        sections = [("Full document", " ".join(f"{h}: {txt}" for h, txt in sections))]
+    name = os.path.basename(source_file)
+    return [{"chunk_id": hashlib.sha1(f"{name}#{i}".encode()).hexdigest()[:16], "doc_name": name, "doc_title": title,
+             "section": heading, "doc_type": meta["doc_type"], "store_id": meta.get("store_id", "ALL"),
+             "product": meta.get("product", ""), "source_format": source_format,
+             "chunk_text": f"{title}. {heading}: {' '.join(text.split())}", "source_file": source_file}
+            for i, (heading, text) in enumerate(sections)]
+
+
+def parse_markdown(content):
+    # Front matter (metadata), "# " title, "## " sections
     front, body = re.match(r"---\n(.*?)\n---\n(.*)", content, re.S).groups()
     meta = dict(line.split(": ", 1) for line in front.splitlines())
     title = re.search(r"^# (.+)$", body, re.M).group(1)
-    sections = [s[3:].split("\n", 1) for s in re.split(r"\n(?=## )", body)[1:]]
-    if len(body.split()) <= MAX_WHOLE_DOC_WORDS:
-        sections = [("Full document", " ".join(f"{h}: {txt}" for h, txt in sections))]
-    rows = []
-    for i, (heading, text) in enumerate(sections):
-        rows.append({
-            "chunk_id": hashlib.sha1(f"{os.path.basename(source_file)}#{i}".encode()).hexdigest()[:16],
-            "doc_name": os.path.basename(source_file).removesuffix(".md"), "doc_title": title, "section": heading,
-            "doc_type": meta["doc_type"], "store_id": meta.get("store_id", "ALL"), "product": meta.get("product", ""),
-            "chunk_text": f"{title}. {heading}: {' '.join(text.split())}", "source_file": source_file})
-    return rows
+    return title, meta, [tuple(s[3:].split("\n", 1)) for s in re.split(r"\n(?=## )", body)[1:]]
 
 
-chunks = pd.DataFrame([r for d in spark.table("bronze_documents").collect() for r in chunk(d.source_file, d.content)])
-# SPARK: join back to bronze_documents in Spark so Unity Catalog lineage links chunks to the landed files
-(spark.createDataFrame(chunks).join(spark.table("bronze_documents").select("source_file", "_ingested_at"), "source_file")
+chunks = [r for d in spark.table("bronze_documents").collect()
+          for r in make_chunks(d.source_file, *parse_markdown(d.content), "markdown")]
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Real formats.** Each format is turned into text with its structure kept: a PDF page by page (so answers can cite the page), a Word file by heading, an image by reading its text with a vision model (OCR).
+# MAGIC Metadata for these files (doc type, store, product) would come from the document store (SharePoint / Drive fields); here it is a small mapping.
+
+# COMMAND ----------
+
+# Parsers for PDF (pypdf, per page), Word (the .docx XML, per heading) and images (vision LLM transcription)
+import base64
+import io
+import zipfile
+from html import unescape
+
+FILE_META = {
+    "supplier_coffee.pdf": {"doc_type": "supplier_agreement", "store_id": "ALL", "product": "Coffee"},
+    "visit_st07_2026_09.docx": {"doc_type": "store_visit", "store_id": "ST-07"},
+    "delivery_note_st07_2026_10_12.png": {"doc_type": "delivery_note", "store_id": "ST-07", "product": "Coffee"},
+}
+
+
+def parse_pdf(data):
+    from pypdf import PdfReader
+    pages = [(n, page.extract_text() or "") for n, page in enumerate(PdfReader(io.BytesIO(data)).pages, start=1)]
+    title = next(line for line in pages[0][1].splitlines() if line.strip())
+    return title, [(f"Page {n}", text) for n, text in pages]
+
+
+def parse_docx(data):
+    xml = zipfile.ZipFile(io.BytesIO(data)).read("word/document.xml").decode()
+    title, sections, heading, lines = "", [], "Summary", []
+    for para in re.findall(r"<w:p>(.*?)</w:p>", xml, re.S):
+        style = re.search(r'w:pStyle w:val="([^"]+)"', para)
+        text = unescape("".join(re.findall(r"<w:t[^>]*>(.*?)</w:t>", para, re.S)))
+        if style and style.group(1) == "Title":
+            title = text
+        elif style and style.group(1).startswith("Heading"):
+            if lines:
+                sections.append((heading, " ".join(lines)))
+            heading, lines = text, []
+        elif text.strip():
+            lines.append(text)
+    sections.append((heading, " ".join(lines)))
+    return title, sections
+
+
+def parse_image(data, mime="image/png"):
+    if not IS_DATABRICKS:
+        return None
+    prompt = "Transcribe all text in this image exactly, keeping table rows on one line. Output only the text."
+    resp = WorkspaceClient().api_client.do("POST", f"/serving-endpoints/{VISION_LLM}/invocations", body={
+        "max_tokens": 600, "temperature": 0, "messages": [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode()}"}}]}]})
+    text = resp["choices"][0]["message"]["content"].strip()
+    title = text.splitlines()[0]
+    return title, [("Transcribed image", "\n".join(text.splitlines()[1:]))]
+
+
+if IS_DATABRICKS:
+    from databricks.sdk import WorkspaceClient
+
+# QUALITY: every file gets a parse log row; a file that yields too little text is not indexed and shows up here
+parse_log = []
+for f in spark.table("bronze_document_files").collect():
+    name = os.path.basename(f.source_file)
+    ext = name.rsplit(".", 1)[-1].lower()
+    parser = {"pdf": ("pypdf", parse_pdf), "docx": ("docx_xml", parse_docx), "png": ("vision_llm_ocr", parse_image),
+              "jpg": ("vision_llm_ocr", parse_image)}.get(ext)
+    parsed = parser[1](bytes(f.content)) if parser else None
+    words = sum(len(text.split()) for _, text in parsed[1]) if parsed else 0
+    status = "parsed" if words >= 10 else ("skipped_locally" if parser and not IS_DATABRICKS else "too_little_text")
+    parse_log.append({"source_file": f.source_file, "source_format": ext, "method": parser[0] if parser else "unsupported",
+                      "words": words, "status": status})
+    if status == "parsed":
+        chunks += make_chunks(f.source_file, parsed[0], FILE_META.get(name, {"doc_type": "unknown"}), parsed[1], ext)
+spark.createDataFrame(pd.DataFrame(parse_log)).write.mode("overwrite").option("overwriteSchema", True).saveAsTable("silver_document_parse_log")
+display(spark.table("silver_document_parse_log"))
+
+# COMMAND ----------
+
+# Write the chunks from every format to one table
+# SPARK: join back to both bronze tables in Spark so Unity Catalog lineage links chunks to the landed files
+landed = (spark.table("bronze_documents").select("source_file", "_ingested_at")
+          .unionByName(spark.table("bronze_document_files").select("source_file", "_ingested_at")))
+(spark.createDataFrame(pd.DataFrame(chunks)).join(landed, "source_file")
  .write.mode("overwrite").option("overwriteSchema", True).saveAsTable("silver_doc_chunks"))
 # Delta Sync indexes read the change feed of their source table
 spark.sql("ALTER TABLE silver_doc_chunks SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
-display(spark.sql("SELECT doc_type, COUNT(DISTINCT doc_name) AS documents, COUNT(*) AS chunks FROM silver_doc_chunks GROUP BY doc_type ORDER BY doc_type"))
+display(spark.sql("""SELECT source_format, doc_type, COUNT(DISTINCT doc_name) AS documents, COUNT(*) AS chunks FROM silver_doc_chunks
+                       GROUP BY source_format, doc_type ORDER BY source_format, doc_type"""))
 
 # COMMAND ----------
 
@@ -221,14 +331,16 @@ if IS_DATABRICKS:
                                                      VectorIndexType)
 
     w = WorkspaceClient()
+    SYNC_COLUMNS = ["chunk_id", "doc_name", "doc_title", "section", "doc_type", "store_id", "product", "source_format", "chunk_text"]
     existing = [i.name for i in w.vector_search_indexes.list_indexes(endpoint_name=VS_ENDPOINT)]
+    # Synced columns are fixed when an index is created: after changing SYNC_COLUMNS, delete the index once and rerun
     if INDEX_NAME not in existing:
         w.vector_search_indexes.create_index(
             name=INDEX_NAME, endpoint_name=VS_ENDPOINT, primary_key="chunk_id", index_type=VectorIndexType.DELTA_SYNC,
             delta_sync_index_spec=DeltaSyncVectorIndexSpecRequest(
                 source_table="workspace.grocery_intel.silver_doc_chunks", pipeline_type=PipelineType.TRIGGERED,
                 embedding_source_columns=[EmbeddingSourceColumn(name="chunk_text", embedding_model_endpoint_name=EMBEDDING_MODEL)],
-                columns_to_sync=["chunk_id", "doc_name", "doc_title", "section", "doc_type", "store_id", "product", "chunk_text"]))
+                columns_to_sync=SYNC_COLUMNS))
     else:
         # TRAP: a TRIGGERED index only picks up a rewritten table when asked to sync
         for _ in range(30):
@@ -278,7 +390,7 @@ if IS_DATABRICKS:
 
 # RULE: grounded answers only: the prompt allows nothing beyond the given numbers and passages, and asks for [doc_name] citations
 SYSTEM_PROMPT = ("You are an assistant for grocery store managers. Answer only from the DATA and DOCUMENTS given. "
-                 "Cite every document you use as [doc_name]. If the context does not answer the question, say so. "
+                 "Cite every document you use as [doc_name], adding the page for PDFs, e.g. [supplier_coffee.pdf, page 2]. If the context does not answer the question, say so. "
                  "Explain the cause from the DOCUMENTS and back it with numbers from the DATA. "
                  "Be concrete: numbers, product names, what to do next. At most 150 words.")
 
@@ -341,11 +453,12 @@ def generate(question, facts, passages):
 
 
 DEMO_QUESTIONS = [  # question, store, the document a correct answer must retrieve
-    ("Why does Coffee keep running out, and what can the store do about it?", "ST-07", "supplier_coffee"),
-    ("Why is this store throwing away so much bread and fresh produce?", "ST-07", "visit_st07_2026_09"),
-    ("Can we get produce delivered twice a week, and what would it cost?", "ST-07", "supplier_greenfield_produce"),
-    ("What happened to beverage sales in the week of 2026-09-07, and should we order more drinks from now on?", "ST-12", "visit_st12_2026_09"),
-    ("What do customers say about plant-based products, and what should we do?", "ST-12", "memo_plant_based_2026_10"),
+    ("Why does Coffee keep running out, and what can the store do about it?", "ST-07", "supplier_coffee.pdf"),
+    ("Why is this store throwing away so much bread and fresh produce?", "ST-07", "visit_st07_2026_09.docx"),
+    ("Did we receive the coffee we ordered for the week of 2026-10-12, and if not, why?", "ST-07", "delivery_note_st07_2026_10_12.png"),
+    ("Can we get produce delivered twice a week, and what would it cost?", "ST-07", "supplier_greenfield_produce.md"),
+    ("What happened to beverage sales in the week of 2026-09-07, and should we order more drinks from now on?", "ST-12", "visit_st12_2026_09.md"),
+    ("What do customers say about plant-based products, and what should we do?", "ST-12", "memo_plant_based_2026_10.md"),
 ]
 if IS_DATABRICKS:
     answers, checks = [], []
@@ -410,7 +523,7 @@ if IS_DATABRICKS:
     SELECT 'documents_chunked' AS check_name, CAST(COUNT(DISTINCT doc_name) AS DOUBLE) AS value, COUNT(DISTINCT doc_name) = {len(documents)} AS passed FROM silver_doc_chunks
     UNION ALL SELECT 'chunks_indexed', CAST({status.indexed_row_count or 0} AS DOUBLE), {status.indexed_row_count or 0} = (SELECT COUNT(*) FROM silver_doc_chunks)
     UNION ALL SELECT 'retrieval_hit_rate', AVG(CAST(hit AS DOUBLE)), AVG(CAST(hit AS DOUBLE)) = 1 FROM gold_rag_check
-    UNION ALL SELECT 'answers_with_citation', AVG(CAST(answer RLIKE '\\\\[[a-z0-9_]+\\\\]' AS DOUBLE)), AVG(CAST(answer RLIKE '\\\\[[a-z0-9_]+\\\\]' AS DOUBLE)) = 1 FROM gold_doc_answers
+    UNION ALL SELECT 'answers_with_citation', AVG(CAST(answer RLIKE '\\\\[[A-Za-z0-9_.-]+' AS DOUBLE)), AVG(CAST(answer RLIKE '\\\\[[A-Za-z0-9_.-]+' AS DOUBLE)) = 1 FROM gold_doc_answers
     """))
 for table, comment in {
     "silver_doc_chunks": "Grain: one section of one document. Text chunks with doc type, store and product metadata; source of the vector index.",
