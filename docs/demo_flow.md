@@ -92,7 +92,7 @@ Talking point: the dashboard is published without embedded credentials, so a sto
 - **Tasks** tab: the graph ingest_sources → bronze → silver_unify → gold_forecast_model → demo_checks + documents_vector_index; each task has a one-line description.
 - **Runs** tab: open the latest run to show every task's duration and the notebook output behind it.
 - Schedule: every Monday 06:00 UTC, created paused. Say: in production this runs after the Sunday stock count; Lakeflow Connect would trigger it when new source data lands.
-- **Models**: Catalog → `grocery_intel` → `demand_forecaster`: version 10 with alias `champion`, linked to its MLflow run. Scoring points at the alias, so a rollback is moving the alias back.
+- **Models**: Catalog → `grocery_intel` → `demand_forecaster`: the latest version (11) holds the alias `champion`, linked to its MLflow run. Scoring points at the alias, so a rollback is moving the alias back.
 
 ---
 
