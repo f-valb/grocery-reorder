@@ -31,8 +31,8 @@ INSTRUCTIONS = [
     "A grocery chain with 20 stores (store_id ST-01 to ST-20, names in silver_stores) and 41 products in 6 categories. "
     "Data comes from three systems (POS, ERP, store-ops app) unified on store_id and item_id.\n",
     "Grain: gold_store_product_week is one row per store, product and week (weeks start on Monday); gold_demand_forecast and "
-    "gold_reorder_recommendation are one row per store and product for next week (week starting 2026-10-26).\n",
-    "The current week (2026-10-19) is partial (data through 2026-10-21, is_partial_week = true): exclude it from trends, "
+    "gold_reorder_recommendation are one row per store and product for next week (week starting 2026-11-09).\n",
+    "The current week (2026-11-02) is partial (data through 2026-11-04, is_partial_week = true): exclude it from trends, "
     "averages and totals unless asked about this week. 'Last 4 weeks' means the last 4 full weeks.\n",
     "Availability = sum(days_in_stock) / sum(period_days). Stockout days = period_days - days_in_stock. "
     "Sales are censored by stockouts: use est_demand (units_sold / days_in_stock * 7) for demand; missed demand = est_demand - units_sold.\n",

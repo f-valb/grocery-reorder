@@ -26,7 +26,7 @@ VS_ENDPOINT = "grocery_docs_vs"
 DOC_FILES = {  # file -> doc_type folder (05_documents_rag reads raw/document_files recursively)
     "supplier_coffee.pdf": "supplier_agreement",
     "visit_st07_2026_09.docx": "store_visit",
-    "delivery_note_st07_2026_10_12.png": "delivery_note",
+    "delivery_note_st07_2026_10_26.png": "delivery_note",
 }
 
 

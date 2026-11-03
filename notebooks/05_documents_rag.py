@@ -99,18 +99,18 @@ documents.append(doc("sop", "sop_stock_counts", "Standard operating procedure: w
 ]))
 # SIGNAL: store visit notes explain ST-07's waste (habitual buffer ordering) and ST-12's one-off spike
 documents.append(doc("store_visit", "visit_st07_2026_09", f"Area manager visit: {stores['ST-07']}",
-    {"store_id": "ST-07", "visit_date": "2026-09-16"}, [
+    {"store_id": "ST-07", "visit_date": "2026-09-30"}, [
     ("Ordering practice", "The store manager orders roughly 50% above the system suggestion on every line, 'to be safe for the weekend'. This is applied to fresh lines too, including sourdough, muffins and strawberries."),
     ("Observations", "Waste bins were full of sourdough and muffins on Monday morning. Back room holds about two weeks of cover on several dry and plant-based lines. Availability on shelf is good."),
     ("Agreed actions", "Follow the system order for fresh lines for 4 weeks and review waste. Area manager to check again in October."),
 ]))
 documents.append(doc("store_visit", "visit_st12_2026_09", f"Area manager visit: {stores['ST-12']}",
-    {"store_id": "ST-12", "visit_date": "2026-09-14"}, [
-    ("Bayside Summer Festival", "The Bayside Summer Festival ran next to the store in the week of 2026-09-07. Beverages sold about three times their normal volume and several lines sold out by Saturday."),
+    {"store_id": "ST-12", "visit_date": "2026-09-28"}, [
+    ("Bayside Summer Festival", "The Bayside Summer Festival ran next to the store in the week of 2026-09-21. Beverages sold about three times their normal volume and several lines sold out by Saturday."),
     ("Guidance", "This was a one-off event. Do not raise standing beverage orders because of it; plan next year's festival as a separate event order."),
 ]))
 documents.append(doc("store_visit", "visit_st03_2026_10", f"Area manager visit: {stores['ST-03']}",
-    {"store_id": "ST-03", "visit_date": "2026-10-07"}, [
+    {"store_id": "ST-03", "visit_date": "2026-10-21"}, [
     ("Summary", "Large store, ordering follows the system. Coffee and pasta gaps on shelf most weeks; the team says deliveries arrive short. Fresh waste in line with the chain average."),
 ]))
 # Promo briefs, one per promoted product, from the promo calendar
@@ -126,20 +126,20 @@ for product, rows in by_product.items():
     ]))
 # Price change notice from the ERP
 documents.append(doc("notice", "notice_cost_increase_2026_09", "Supplier cost increase notice",
-    {"product": ", ".join(r.product_name for r in price_changes), "store_id": "ALL", "effective_date": "2026-09-14"}, [
-    ("Change", "From 2026-09-14 unit costs rise by about 12% and shelf prices by about 10% on: "
+    {"product": ", ".join(r.product_name for r in price_changes), "store_id": "ALL", "effective_date": "2026-09-28"}, [
+    ("Change", "From 2026-09-28 unit costs rise by about 12% and shelf prices by about 10% on: "
      + "; ".join(f"{r.product_name} (cost {r.old_cost:.2f} to {r.new_cost:.2f})" for r in price_changes) + "."),
-    ("Reporting", "Revenue and waste value for weeks before 2026-09-14 use the old prices."),
+    ("Reporting", "Revenue and waste value for weeks before 2026-09-28 use the old prices."),
 ]))
 # Category and launch memos
 documents.append(doc("category_memo", "memo_plant_based_2026_10", "Category review: plant-based",
-    {"product": "Plant-based", "store_id": "ALL", "author": "Category manager", "date": "2026-10-05"}, [
+    {"product": "Plant-based", "store_id": "ALL", "author": "Category manager", "date": "2026-10-19"}, [
     ("Trend", "Plant-based demand has grown about 6% a week since August across all stores, led by oat milk, tofu and plant mince."),
     ("Recommendation", "Increase facings for oat milk and almond yogurt and let the forecast drive orders; do not cap plant-based orders at last quarter's volume."),
 ]))
 documents.append(doc("launch_memo", "launch_protein_bar", "New product launch: Protein Bar",
-    {"product": "Protein Bar", "store_id": "ALL", "date": "2026-09-28"}, [
-    ("Launch", "Protein Bar (Dry Goods, case of 24) launched in all stores in the week of 2026-09-28."),
+    {"product": "Protein Bar", "store_id": "ALL", "date": "2026-10-12"}, [
+    ("Launch", "Protein Bar (Dry Goods, case of 24) launched in all stores in the week of 2026-10-12."),
     ("Forecasting", "With fewer than 3 weeks of sales, forecasts use the average of the weeks available (or the category median before the first sale). Review after 6 weeks."),
 ]))
 # SIGNAL: customer feedback digests that echo the stockouts, the fresh quality issue and plant-based demand
@@ -151,7 +151,7 @@ feedback = {
 }
 for store_id, comments in feedback.items():
     documents.append(doc("customer_feedback", f"feedback_{store_id.lower()}_2026_q3", f"Customer feedback digest Q3: {stores[store_id]}",
-        {"store_id": store_id, "period": "2026-08 to 2026-10"}, [
+        {"store_id": store_id, "period": "2026-08 to 2026-11"}, [
         ("Top comments", "\n".join(f"- {c}" for c in comments)),
     ]))
 
@@ -241,7 +241,7 @@ from html import unescape
 FILE_META = {
     "supplier_coffee.pdf": {"doc_type": "supplier_agreement", "store_id": "ALL", "product": "Coffee"},
     "visit_st07_2026_09.docx": {"doc_type": "store_visit", "store_id": "ST-07"},
-    "delivery_note_st07_2026_10_12.png": {"doc_type": "delivery_note", "store_id": "ST-07", "product": "Coffee"},
+    "delivery_note_st07_2026_10_26.png": {"doc_type": "delivery_note", "store_id": "ST-07", "product": "Coffee"},
 }
 
 
@@ -349,10 +349,16 @@ if IS_DATABRICKS:
                 break
             except Exception:
                 time.sleep(10)  # the index is still busy with an earlier sync
+    # TRAP: wait for the sync we just triggered, not just a matching row count: replacing one document with another
+    # keeps the count the same, and answers generated before the sync cite the old document
+    triggered_ms = int(time.time() * 1000) - 60_000  # a minute of slack for clock differences
+    sync_pipeline = w.vector_search_indexes.get_index(INDEX_NAME).delta_sync_index_spec.pipeline_id
     expected = spark.table("silver_doc_chunks").count()
     for attempt in range(90):  # up to 15 minutes for the first build
         status = w.vector_search_indexes.get_index(INDEX_NAME).status
-        if status.ready and (status.indexed_row_count or 0) == expected:
+        latest = (w.pipelines.list_updates(sync_pipeline, max_results=1).updates or [None])[0]
+        synced = latest is not None and latest.creation_time >= triggered_ms and latest.state.value == "COMPLETED"
+        if status.ready and synced and (status.indexed_row_count or 0) == expected:
             break
         time.sleep(10)
     print(f"index ready={status.ready}, indexed {status.indexed_row_count} of {expected} chunks")
@@ -455,9 +461,9 @@ def generate(question, facts, passages):
 DEMO_QUESTIONS = [  # question, store, the document a correct answer must retrieve
     ("Why does Coffee keep running out, and what can the store do about it?", "ST-07", "supplier_coffee.pdf"),
     ("Why is this store throwing away so much bread and fresh produce?", "ST-07", "visit_st07_2026_09.docx"),
-    ("Did we receive the coffee we ordered for the week of 2026-10-12, and if not, why?", "ST-07", "delivery_note_st07_2026_10_12.png"),
+    ("Did we receive the coffee we ordered for the week of 2026-10-26, and if not, why?", "ST-07", "delivery_note_st07_2026_10_26.png"),
     ("Can we get produce delivered twice a week, and what would it cost?", "ST-07", "supplier_greenfield_produce.md"),
-    ("What happened to beverage sales in the week of 2026-09-07, and should we order more drinks from now on?", "ST-12", "visit_st12_2026_09.md"),
+    ("What happened to beverage sales in the week of 2026-09-21, and should we order more drinks from now on?", "ST-12", "visit_st12_2026_09.md"),
     ("What do customers say about plant-based products, and what should we do?", "ST-12", "memo_plant_based_2026_10.md"),
 ]
 if IS_DATABRICKS:

@@ -34,7 +34,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 
 spark.sql("USE workspace.grocery_intel")
 IS_DATABRICKS = "DATABRICKS_RUNTIME_VERSION" in os.environ
-AS_OF = pd.Timestamp("2026-10-21")  # same fixed as-of date as the generator
+AS_OF = pd.Timestamp("2026-11-04")  # same fixed as-of date as the generator
 MODEL_NAME = "workspace.grocery_intel.demand_forecaster"
 
 # COMMAND ----------

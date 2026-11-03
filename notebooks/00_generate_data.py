@@ -2,7 +2,7 @@
 # MAGIC %md
 # MAGIC # 00 Generate data (mocked source systems)
 # MAGIC **Purpose:** synthetic data for 20 stores × 41 products × 12 weeks, from a stock simulation (stockouts really censor sales), written in the shape of three source systems.
-# MAGIC **Inputs:** none (fixed seed 42, fixed as-of date 2026-10-21).
+# MAGIC **Inputs:** none (fixed seed 42, fixed as-of date 2026-11-04).
 # MAGIC **Outputs:** one parquet file per source table in `/Volumes/workspace/grocery_intel/raw/`:
 # MAGIC | Source system | Tables | Look and feel |
 # MAGIC |---|---|---|
@@ -32,8 +32,8 @@ except NameError:
 SEED = 42
 rng = np.random.default_rng(SEED)
 N_WEEKS = 12
-FIRST_WEEK = pd.Timestamp("2026-08-03")  # a Monday
-AS_OF = pd.Timestamp("2026-10-21")       # RULE: data runs through Wednesday of week 12 (a partial week)
+FIRST_WEEK = pd.Timestamp("2026-08-17")  # a Monday
+AS_OF = pd.Timestamp("2026-11-04")       # RULE: data runs through Wednesday of week 12 (a partial week)
 PARTIAL_DAYS = (AS_OF - (FIRST_WEEK + pd.Timedelta(weeks=N_WEEKS - 1))).days + 1
 
 if spark is not None:

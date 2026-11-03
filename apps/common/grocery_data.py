@@ -127,7 +127,7 @@ def kpis(store_id="ALL"):
 
 def reorder_list(store_id="ALL", product=None):
     return run_sql(f"""
-    SELECT r.store_id, r.product_name, r.category, r.week_start AS order_for_week,
+    SELECT r.store_id, r.item_id AS sku, r.product_name, r.category, r.week_start AS order_for_week,
            round(r.forecast_units, 1) AS forecast_units, round(f.forecast_low, 1) AS forecast_low,
            round(f.forecast_high, 1) AS forecast_high, r.on_hand_at_arrival, r.order_units, r.order_cases,
            round(r.order_value, 2) AS order_value, r.reason

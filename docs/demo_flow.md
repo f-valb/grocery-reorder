@@ -44,7 +44,7 @@ SELECT doc_name, source_format, section, ROUND(search_score, 3) AS score
 FROM vector_search(index => 'workspace.grocery_intel.doc_chunks_index',
                    query_text => 'why does our coffee supplier deliver less than we order', num_results => 3);
 ```
-Expect three formats in one result: `delivery_note_st07_2026_10_12.png` (the photo), then `supplier_coffee.pdf` Page 2 and Page 1. Say: "the photo of a delivery note and a PDF contract, searched by meaning, no keywords".
+Expect three formats in one result: `delivery_note_st07_2026_10_26.png` (the photo), then `supplier_coffee.pdf` Page 2 and Page 1. Say: "the photo of a delivery note and a PDF contract, searched by meaning, no keywords".
 
 Then retrieval + generation in one statement:
 ```sql
@@ -61,9 +61,9 @@ Expect: the order was cut back to the allocation (clause 4.1) [delivery_note…p
 
 **Pre-computed grounded answers** (numbers + documents): `SELECT store_id, question, answer, source_documents FROM workspace.grocery_intel.gold_doc_answers`:
 - ST-07 Coffee: allocation capped at 70% [supplier_coffee.pdf, page 2]; emergency order or a higher allocation with 4 weeks of evidence
-- ST-07 delivery, week of 2026-10-12: ordered 264, received 96, cut back per clause 4.1 [delivery_note_st07_2026_10_12.png] + [supplier_coffee.pdf, page 2]: the photo and the contract tell one story
+- ST-07 delivery, week of 2026-10-26: ordered 264, received 96, cut back per clause 4.1 [delivery_note_st07_2026_10_26.png] + [supplier_coffee.pdf, page 2]: the photo and the contract tell one story
 - ST-07 waste: the manager orders ~50% above the system suggestion on fresh lines [visit_st07_2026_09.docx]; Sourdough $532, Muffins $424 wasted
-- ST-12 week of 2026-09-07: Bayside Summer Festival, one-off: don't raise standing drink orders
+- ST-12 week of 2026-09-21: Bayside Summer Festival, one-off: don't raise standing drink orders
 
 Back in Genie: *"Show me the weekly brief for ST-07 and the documents it cites"* returns the generated brief with its sources.
 

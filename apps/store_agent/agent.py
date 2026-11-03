@@ -54,6 +54,7 @@ Rules:
 - For why questions, combine data (get_critical_items, get_reorder) with documents (search_documents) and cite each
   document you use as [doc_name].
 - Store codes look like ST-07. Stores visible to this user: {stores}.
+- Name each product with its SKU when a tool returned it, e.g. Coffee (SKU-00027): the SKU is what stores order by.
 - If a question is not about the stores, products, stock, sales, waste, orders or suppliers, say briefly that you can
   only help with store operations, and do not call tools.
 - Answer in at most 120 words: the answer first, then 1-3 bullet points with the evidence, then one suggested action."""
@@ -61,7 +62,7 @@ Rules:
 
 def tool_get_critical_items(store_id, limit=5):
     items = data.critical_items(store_id.upper()).head(int(limit or 5))
-    return items[["store_id", "product_name", "issue", "detail", "impact_usd", "severity", "next_week_order_cases"]]
+    return items[["store_id", "item_id", "product_name", "issue", "detail", "impact_usd", "severity", "next_week_order_cases"]]
 
 
 def tool_get_reorder(store_id, product=None):

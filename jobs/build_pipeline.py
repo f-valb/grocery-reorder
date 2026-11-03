@@ -30,7 +30,7 @@ def cli(*args):
 def pipeline_settings(source_dir):
     return {"name": PIPELINE_NAME, "serverless": True, "catalog": "workspace", "schema": "grocery_intel",
             "libraries": [{"file": {"path": f"{source_dir}/grocery_sources.py"}}],
-            "configuration": {"app.raw_dir": "/Volumes/workspace/grocery_intel/raw", "app.as_of": "2026-10-21"},
+            "configuration": {"app.raw_dir": "/Volumes/workspace/grocery_intel/raw", "app.as_of": "2026-11-04"},
             "continuous": False, "development": False, "channel": "CURRENT",
             "tags": {"project": "grocery-reorder", "layer": "bronze-silver-gold"}}
 

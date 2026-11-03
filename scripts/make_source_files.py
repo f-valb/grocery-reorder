@@ -4,7 +4,7 @@
 
 Writes to docs/source_files/ (committed, so the demo files are reviewable). Uses only matplotlib (PDF with real,
 selectable text), the standard library (a .docx is zipped XML) and PIL (an image: the text is pixels and needs OCR).
-Numbers match the generated data: ST-07 ordered 264 units of Coffee for the week of 2026-10-12 and received 96.
+Numbers match the generated data: ST-07 ordered 264 units of Coffee for the week of 2026-10-26 and received 96.
 """
 
 import zipfile
@@ -63,7 +63,7 @@ with PdfPages(OUT / "supplier_coffee.pdf") as pdf:
 # --- DOCX: area manager visit note for ST-07 (minimal Word document: zipped WordprocessingML) -----------------------
 paragraphs = [
     ("Title", "Area manager visit: Store 07 - Westgate"),
-    (None, "Visit date: 16 September 2026. Visited by: area manager, North region."),
+    (None, "Visit date: 30 September 2026. Visited by: area manager, North region."),
     ("Heading1", "Ordering practice"),
     (None, "The store manager orders roughly 50% above the system suggestion on every line, to be safe for the weekend. "
            "This is applied to fresh lines too, including sourdough, muffins and strawberries."),
@@ -104,9 +104,9 @@ except OSError:
     font = bold = ImageFont.load_default()
 lines = [
     (bold, "BeanCo Roasters - DELIVERY NOTE"),
-    (font, "Delivery note no. DN-20261012-07"),
+    (font, "Delivery note no. DN-20261026-07"),
     (font, "Deliver to: Store 07 - Westgate (ST-07)"),
-    (font, "Delivery date: Monday 12 October 2026"),
+    (font, "Delivery date: Monday 26 October 2026"),
     (font, ""),
     (bold, ["Item", "Ordered", "Delivered"]),
     (font, ["Coffee", "264", "96"]),
@@ -126,7 +126,7 @@ for f, text in lines:
         draw.text((60, y), text, fill="black", font=f)
     y += 52 if f is bold else 44
 img = img.rotate(1.5, expand=True, fillcolor="#f2f0ea").filter(ImageFilter.GaussianBlur(0.6))
-img.save(OUT / "delivery_note_st07_2026_10_12.png")
+img.save(OUT / "delivery_note_st07_2026_10_26.png")
 
 for path in sorted(OUT.iterdir()):
     print(f"{path.name}: {path.stat().st_size:,} bytes")

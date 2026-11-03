@@ -321,7 +321,7 @@ def silver_quality_log():
 
 
 # --- Gold: the weekly store-item data product (store x product x week) ---------------------------------------------
-AS_OF = spark.conf.get("app.as_of", "2026-10-21")  # same fixed as-of date as the generator: the current week is partial
+AS_OF = spark.conf.get("app.as_of", "2026-11-04")  # same fixed as-of date as the generator: the current week is partial
 
 # Explicit schema so Unity Catalog can attach the row filter and the column mask (both need the functions from 00b_governance)
 GOLD_WEEK_SCHEMA = """

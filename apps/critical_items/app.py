@@ -58,11 +58,11 @@ tab_items, tab_chart, tab_orders = st.tabs(["Act on these", "Where the money is"
 
 with tab_items:
     st.dataframe(
-        shown[["severity", "store_id", "product_name", "category", "issue", "detail", "impact_usd", "next_week_order_cases"]],
+        shown[["severity", "store_id", "item_id", "product_name", "category", "issue", "detail", "impact_usd", "next_week_order_cases"]],
         hide_index=True, use_container_width=True,
         column_config={"impact_usd": st.column_config.NumberColumn("At stake", format="$%d"),
                        "next_week_order_cases": st.column_config.NumberColumn("Order next week (cases)"),
-                       "product_name": "Product", "store_id": "Store", "issue": "Problem", "detail": "Why"})
+                       "item_id": "SKU", "product_name": "Product", "store_id": "Store", "issue": "Problem", "detail": "Why"})
     st.download_button("Download as CSV", shown.to_csv(index=False), "critical_items.csv", "text/csv")
 
 with tab_chart:
@@ -80,7 +80,7 @@ with tab_chart:
 with tab_orders:
     st.caption("Model forecast with its 80% range; order = forecast + safety stock - stock on arrival, in whole cases.")
     st.dataframe(reorder, hide_index=True, use_container_width=True,
-                 column_config={"order_value": st.column_config.NumberColumn("Order value", format="$%.2f")})
+                 column_config={"sku": "SKU", "order_value": st.column_config.NumberColumn("Order value", format="$%.2f")})
 
 # Data health strip: can I trust these numbers?
 st.divider()
