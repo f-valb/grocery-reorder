@@ -10,3 +10,4 @@ Interview build: sales, stock and waste for a 20-store grocery chain, plus next 
 - Demo assets (v2): Genie space `genie/build_genie_space.py --test` (id in genie/space_id.txt), dashboard `dashboards/build_dashboard.py` (id in dashboards/dashboard_id_intel.txt), run-of-show in docs/demo_flow.md
 - Saved job: `jobs/build_job.py [--run]` (id in jobs/job_id.txt); runs 00, the bronze+silver pipeline, 03-05 as one Lakeflow Job, schedule paused
 - Pipeline: `pipelines/grocery_sources.py` via `jobs/build_pipeline.py [--run]` (id in jobs/pipeline_id.txt); owns all bronze_* (non-document) and silver_* (non-document) tables
+- Apps: `apps/deploy_apps.py` (deploy both) / `--stop` / `--stage` (copy apps/common for a local `streamlit run`); app venv `~/.local/venvs/apps`; agent test `python apps/store_agent/agent.py`

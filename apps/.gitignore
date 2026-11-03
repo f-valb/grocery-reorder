@@ -1,0 +1,3 @@
+# Copied in from apps/common by deploy_apps.py --stage; the source of truth is apps/common/grocery_data.py
+critical_items/grocery_data.py
+store_agent/grocery_data.py

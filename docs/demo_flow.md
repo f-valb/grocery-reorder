@@ -118,6 +118,27 @@ Talking point: lineage, quality and access control come from Unity Catalog autom
 
 ---
 
+## 4. Apps: the same data product, built for the people who act on it (4 min)
+**Compute** → **Apps** (https://dbc-0a174280-b54a.cloud.databricks.com/apps-v2?o=7474648703926670). Code in `apps/`, deployed by `apps/deploy_apps.py`. Start them about 5 minutes before the demo (`deploy_apps.py`), stop them after (`--stop`).
+
+**`grocery-critical-items`** (store manager's Monday screen):
+- KPI tiles for the last 4 complete weeks: shelf availability, lost sales, waste at cost, number of critical items.
+- **Act on these**: items with at least $100 at stake, ranked: stockouts (lost sales), waste (at cost), short next week (forecast above stock on arrival + order). Pick ST-07: coffee stockouts first, then sourdough, muffins and strawberries waste.
+- **Where the money is**: dollars at stake by category and by store. **Next week's orders**: forecast with its 80% range, cases, reason.
+- Bottom strip: data refreshed, rows quarantined, champion model version and its gate, quality checks. Say: "the screen tells you whether to trust it".
+- Say: the app runs as the viewer (user authorization), so a store manager gets only their store, the same row filter as the dashboard and Genie.
+
+**`grocery-store-agent`** (the GenAI agent):
+- Click the suggested questions in order. Expand each 🔧 step to show the tool call and the rows or passages it returned.
+  1. "3 most critical items at ST-07" → `get_critical_items`
+  2. "Why is coffee always out of stock at ST-07" → `search_documents`: allocation clause 4.1 [supplier_coffee.pdf], the photographed delivery note, the visit note
+  3. "How much should ST-12 order of strawberries" → `get_reorder`: 12 units (1 case), capped by shelf life
+  4. "Which region has the highest waste?" → `ask_genie`: the agent hands analytics questions to Genie and shows its SQL
+  5. "What's the weather tomorrow?" → refuses, no tools called
+- Say: the model only decides *which* tool to call; every number comes from governed tables, so answers are auditable and inherit the viewer's permissions.
+
+---
+
 ## Backup if something misbehaves
 - Genie gives a different answer: open the SQL and say how you'd fix it (add the definition to the instructions). The same 5 questions were tested through the Genie API before the demo.
 - Dashboard slow on first open: the serverless warehouse is starting. Use the `04_demo_queries` output of the last job run instead: same numbers, plus charts.
