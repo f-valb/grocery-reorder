@@ -51,6 +51,13 @@
    ]
   },
   {
+   "name": "ds_briefs",
+   "displayName": "AI weekly brief per store",
+   "queryLines": [
+    "SELECT store_id, store_name, brief, array_join(source_documents, ', ') AS sources FROM workspace.grocery_intel.gold_store_briefs\n"
+   ]
+  },
+  {
    "name": "ds_model_error",
    "displayName": "Forecast error by method (backtest)",
    "queryLines": [
@@ -183,6 +190,19 @@
          ],
          "disaggregated": false
         }
+       },
+       {
+        "name": "ds_briefs_store_id",
+        "query": {
+         "datasetName": "ds_briefs",
+         "fields": [
+          {
+           "name": "store_id",
+           "expression": "`store_id`"
+          }
+         ],
+         "disaggregated": false
+        }
        }
       ],
       "spec": {
@@ -214,6 +234,11 @@
           "fieldName": "store_id",
           "displayName": "Store",
           "queryName": "ds_trend_store_id"
+         },
+         {
+          "fieldName": "store_id",
+          "displayName": "Store",
+          "queryName": "ds_briefs_store_id"
          }
         ]
        },
@@ -999,6 +1024,66 @@
       "y": 35,
       "width": 12,
       "height": 4
+     }
+    },
+    {
+     "widget": {
+      "name": "tbl_briefs",
+      "queries": [
+       {
+        "name": "main_query",
+        "query": {
+         "datasetName": "ds_briefs",
+         "fields": [
+          {
+           "name": "store_id",
+           "expression": "`store_id`"
+          },
+          {
+           "name": "brief",
+           "expression": "`brief`"
+          },
+          {
+           "name": "sources",
+           "expression": "`sources`"
+          }
+         ],
+         "disaggregated": true
+        }
+       }
+      ],
+      "spec": {
+       "version": 2,
+       "widgetType": "table",
+       "encodings": {
+        "columns": [
+         {
+          "fieldName": "store_id",
+          "displayName": "Store"
+         },
+         {
+          "fieldName": "brief",
+          "displayName": "Brief"
+         },
+         {
+          "fieldName": "sources",
+          "displayName": "Documents cited"
+         }
+        ]
+       },
+       "frame": {
+        "showTitle": true,
+        "title": "Weekly brief (generated from the store numbers and its documents)",
+        "showDescription": true,
+        "description": "LLM answer grounded in gold numbers + vector search over supplier terms, SOPs and visit notes"
+       }
+      }
+     },
+     "position": {
+      "x": 0,
+      "y": 39,
+      "width": 12,
+      "height": 8
      }
     }
    ]

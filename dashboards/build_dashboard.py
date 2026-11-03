@@ -48,6 +48,8 @@ FROM {S}.gold_reorder_recommendation WHERE order_units > 0 ORDER BY store_id, or
 SELECT store_id, week_start, sum(days_in_stock) AS days_in_stock, sum(period_days) AS period_days,
   sum(waste_value) AS waste_value, sum(revenue) AS revenue
 FROM {S}.gold_store_product_week WHERE NOT is_partial_week GROUP BY ALL"""),
+        ds("ds_briefs", "AI weekly brief per store", f"""
+SELECT store_id, store_name, brief, array_join(source_documents, ', ') AS sources FROM {S}.gold_store_briefs"""),
     ]
     all_ds = [d["name"] for d in datasets]  # the store filter applies to these (chain-level datasets below have no store_id)
     datasets += [
@@ -97,6 +99,10 @@ UNION ALL SELECT 'saas_promo_tool', 'promo_calendar', count(*) FROM {S}.bronze_p
               x=6, y=29, w=6, h=6),
         table("tbl_sources", "Rows landed per source system", "ds_sources",
               [("source_system", "Source system"), ("source_table", "Table"), ("bronze_rows", "Rows")], x=0, y=35, w=12, h=4),
+        table("tbl_briefs", "Weekly brief (generated from the store numbers and its documents)", "ds_briefs",
+              [("store_id", "Store"), ("brief", "Brief"), ("sources", "Documents cited")],
+              description="LLM answer grounded in gold numbers + vector search over supplier terms, SOPs and visit notes",
+              x=0, y=39, w=12, h=8),
     ]
     return {"datasets": datasets, "pages": [{"name": "store", "displayName": "Store manager", "pageType": "PAGE_TYPE_CANVAS",
                                              "layoutVersion": "GRID_V1", "layout": layout}], "uiSettings": {"theme": kit.THEME}}

@@ -1,4 +1,4 @@
-# Demo flow: Genie → dashboard → lineage (about 12 minutes)
+# Demo flow: Genie + documents → dashboard → lineage (about 16 minutes)
 
 Workspace: https://dbc-0a174280-b54a.cloud.databricks.com/?o=7474648703926670 · schema `workspace.grocery_intel`
 
@@ -23,6 +23,46 @@ Click **Show code** on one answer: the SQL is readable and auditable. If Genie a
 
 **Optional, if they ask about trust:** "How many rows did we quarantine per rule?" (reads `silver_quality_log`).
 
+### 1b. Documents: vector search finds the *why* (4 min)
+Genie answers **what** from tables. The **why** is in documents: supplier contracts, the fresh SOP, area-manager visit notes, promo briefs, customer feedback (24 documents in the `raw/documents` volume).
+
+**Process to explain** (notebook `05_documents_rag`):
+1. Files land in the volume → `bronze_documents`
+2. Chunked by section (short notes stay whole) → `silver_doc_chunks` (39 chunks, with doc type / store / product metadata)
+3. Vector Search index `doc_chunks_index` on endpoint `grocery_docs_vs` embeds every chunk with `databricks-gte-large-en` and re-syncs when the table changes
+4. A question is embedded the same way; the closest chunks come back with a score
+5. Llama 3.3 70B answers **only** from those chunks plus the gold numbers, citing `[doc_name]`
+
+**Live in the SQL editor:**
+```sql
+SELECT doc_name, section, ROUND(search_score, 3) AS score
+FROM vector_search(index => 'workspace.grocery_intel.doc_chunks_index',
+                   query_text => 'why do we keep running out of coffee', num_results => 3);
+```
+Expect `supplier_coffee`: Allocation (clause 4.1), then Emergency orders (clause 4.2).
+
+Then retrieval + generation in one statement:
+```sql
+WITH passages AS (
+  SELECT doc_name, chunk_text FROM vector_search(index => 'workspace.grocery_intel.doc_chunks_index',
+    query_text => 'Why do we keep running out of coffee, and what can we do?', num_results => 4)),
+context AS (SELECT concat_ws('\n', collect_list(concat('[', doc_name, '] ', chunk_text))) AS passages FROM passages)
+SELECT ai_query('databricks-meta-llama-3-3-70b-instruct',
+  concat('Answer only from these passages and cite each one you use as [doc_name]. At most 80 words.\n', passages,
+         '\nQuestion: Why do we keep running out of coffee, and what can we do?')) AS answer
+FROM context;
+```
+Expect: allocation limits [supplier_coffee]; request a higher allocation / emergency order.
+
+**Pre-computed grounded answers** (numbers + documents): `SELECT store_id, question, answer, source_documents FROM workspace.grocery_intel.gold_doc_answers`:
+- ST-07 Coffee: capped at 70% of ~134 units a week (≈94); emergency order up to 30% (≈28 units) at +8%, or ask for a higher allocation with 4 weeks of evidence
+- ST-07 waste: the manager orders ~50% above the system suggestion on fresh lines; Sourdough $532, Muffins $424 wasted
+- ST-12 week of 2026-09-07: Bayside Summer Festival, one-off: don't raise standing drink orders
+
+Back in Genie: *"Show me the weekly brief for ST-07 and the documents it cites"* returns the generated brief with its sources.
+
+Talking point: the documents are governed like the tables (volume, Delta tables and index all in Unity Catalog); retrieval is checked (`gold_rag_check`: 5 of 5 demo questions found the document that holds the answer); every answer cites its source.
+
 ---
 
 ## 2. Reports and dashboard, including predictions (4 min)
@@ -35,6 +75,7 @@ Open **Grocery intelligence**: https://dbc-0a174280-b54a.cloud.databricks.com/da
    - model health: drift scores (PSI) are under the 0.25 alert, champion = model, `retrain_needed` = false
    - say: this is how we'd know when to retrain
 4. **Rows per source system:** the three systems landing side by side.
+5. **Weekly brief** at the bottom: with ST-07 selected, the generated brief names its stockouts (allocation clause) and waste (ordering above the system), with the documents cited.
 
 Talking point: the dashboard is published without embedded credentials, so a store manager opening it sees only their own store (row filter `gov_store_filter`), and only finance sees unit cost (column mask).
 
@@ -48,6 +89,8 @@ Walk it right to left:
 2. `gold_store_product_week` ← `silver_sales_weekly`, `silver_stock_snapshots`, `silver_waste_events`, `silver_products`, `silver_promotions`, `silver_stores`
 3. silver ← `bronze_pos_*` (Postgres POS), `bronze_erp_*` (MySQL ERP), `bronze_ops_waste_log` / `bronze_promo_calendar` (SaaS)
 4. bronze ← the raw extract files in the `raw` volume
+
+Then the documents chain: `gold_store_briefs` ← `silver_doc_chunks` ← `bronze_documents` ← the files in `raw/documents`; the vector index `doc_chunks_index` hangs off `silver_doc_chunks`.
 
 Then:
 - Click `gold_store_product_week` → **Columns** → `est_demand`: column-level lineage back to `units_sold` and `days_in_stock`.

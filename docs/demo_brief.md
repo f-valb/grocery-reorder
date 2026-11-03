@@ -8,6 +8,8 @@ Schema `workspace.grocery_intel`. v1 (single source, no ML) stays on `main` in `
 **Verified on serverless** (workspace `food`, 2026-11-03): 00–04 pass, numbers match the local PySpark run. Dashboard: https://dbc-0a174280-b54a.cloud.databricks.com/dashboardsv3/01f1d72d64ab1c8b92f78b4c747b325a/published (8 datasets, 15 widgets; every dataset query checked on the warehouse; open it once to check the layout).
 Free Edition limits found and handled: the UC model registry denies model file uploads, so the model is logged to the MLflow experiment and the champion decision lives in `gold_model_monitor`; time travel is blocked on tables with a row filter, so the rerun check uses run fingerprints.
 
+**GenAI layer:** Genie space over the gold tables (text-to-SQL with business instructions and example SQL) plus a documents layer: 24 mocked documents → 39 chunks → Vector Search index → grounded, cited answers and a weekly brief per store (Llama 3.3 70B). Retrieval check 5 of 5. Run-of-show: `docs/demo_flow.md`.
+
 ## Row counts per layer
 | Source system | Bronze | Silver | Quarantined | Re-sends removed |
 |---|---|---|---|---|
@@ -89,7 +91,7 @@ Every bronze row is accounted for (0 unexplained). Gold: `gold_store_product_wee
 | 04_demo_queries | 5 Execution plan | broadcast join, partial/final aggregate, AQE |
 
 ## What I'd do next
-1. GenAI layer: a store manager assistant over the gold tables plus documents (supplier terms, shelf-life SOPs, promo plans).
-2. Two deliveries a week for short-life perishables; re-run the backtest.
-3. Supplier fill rates per item, so constrained items are ordered earlier or substituted.
-4. Model registry on a paid workspace (UC alias `champion`, already coded); schedule train → gate → score as a job with a condition task on `retrain_needed`; Lakeflow Connect for the real Postgres/MySQL sources.
+1. Two deliveries a week (the GreenField agreement already offers it at $45 per delivery) for short-life perishables; re-run the backtest.
+2. Supplier fill rates per item, so constrained items are ordered earlier or substituted.
+3. Model registry on a paid workspace (UC alias `champion`, already coded); schedule train → gate → score as a job with a condition task on `retrain_needed`; Lakeflow Connect for the real Postgres/MySQL sources.
+4. Documents: real connectors (SharePoint / Drive) into the volume, ai_parse_document for PDFs, and an agent that routes questions to Genie (numbers) or the index (documents) in one chat.

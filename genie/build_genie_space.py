@@ -21,7 +21,7 @@ TITLE = "Grocery store assistant"
 DESCRIPTION = "Ask about availability, stockouts, waste, next week's orders and the demand forecast for 20 stores."
 
 TABLES = ["gold_store_product_week", "gold_demand_forecast", "gold_reorder_recommendation", "gold_backtest_summary",
-          "gold_model_monitor", "silver_stores", "silver_quality_log"]
+          "gold_model_monitor", "silver_stores", "silver_quality_log", "gold_store_briefs"]
 
 INSTRUCTIONS = [
     "A grocery chain with 20 stores (store_id ST-01 to ST-20, names in silver_stores) and 41 products in 6 categories. "
@@ -44,6 +44,8 @@ INSTRUCTIONS = [
     "Category growth means the sustained trend, not one week: compare average weekly est_demand of the last 4 full weeks with the 4 full "
     "weeks before, excluding promo and spike weeks, as a percentage change per category.\n",
     "Spike weeks (is_spike_week) are real one-off events, kept in sales but excluded from forecasts. Promo weeks have is_promo = true.\n",
+    "gold_store_briefs holds an AI-generated weekly brief per store (from its numbers and its documents: supplier terms, SOPs, "
+    "visit notes), with source_documents. When asked for a store brief or why a store has a problem, show the brief and its sources.\n",
     "Show money in USD rounded to the nearest dollar, percentages with one decimal. For 'top' questions return the top 10.",
 ]
 
