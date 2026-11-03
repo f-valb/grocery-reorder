@@ -26,3 +26,11 @@
 - Dedupe in two steps: exact re-sends (identical values) are dropped before the rules; after the rules, the latest valid version per key wins. Locally: 120 re-sends removed, 0 superseded, and silver sales/snapshots = 9,680 rows = the true row count.
 - Waste is bucketed by store-local event date (585 of 6,545 logs would move week if bucketed in UTC) and by event time, not sync time (68 late-synced logs stay in their week).
 - Value rules only apply when keys are known (`NOT keys_known OR ...`), so an orphan row fails only the key rule and the per-rule counts add up.
+- Model: one global scikit-learn HistGradientBoosting model across all store-items that predicts actual demand / baseline forecast (a multiplier), plus 10%/90% quantile models for the range. Inputs are known at order time: history up to last week and the planned promo calendar. Chosen over one model per item: cheap to train, and new items borrow from their category.
+- Gate: the model is champion only if its backtest WAPE beats the baseline by more than 2% (relative). Locally: model 10.5% vs baseline 13.6% (non-promo 10.5% vs 12.2%, promo weeks 10.4% vs 43.8%). If it ever loses, the baseline keeps serving and `retrain_needed` is raised.
+- Safety stock for the model uses the width of its own 80% range; for the baseline, the trend residuals.
+- Backtest now includes promo weeks (the model plans for them); spike weeks are left out of the evaluation as one-offs.
+- MLflow: logged runs, model registered in UC (`grocery_intel.demand_forecaster`) with a `champion` alias on Databricks; locally a file store and no registry.
+- Drift: PSI on the 4 continuous model inputs, training rows vs next week's scoring rows, alert above 0.25 (kit default).
+- Governance: `gov_store_managers` mapping table, row filter on store_id for the 3 store-facing gold tables, column mask on unit_cost (admin and finance only). Written for Unity Catalog, not testable on local Spark.
+- `CREATE OR REPLACE TABLE ... AS` is avoided in gold: local Spark has no Delta; DataFrame overwrite works in both.
