@@ -22,3 +22,7 @@
 - Flaws are extra corrupted copies of true rows (later `updated_at`), never edits, and quality rules run before dedupe so a corrupted copy can't win.
 - Bronze reads every extract with an explicit schema; SaaS fields stay text and are parsed in silver, where misfits are quarantined.
 - Spike rule for one-off events: residual from the store-item's trend line above median + 3.5 × max(1.4826 × MAD, √mean). Robust stats, because the spike itself would inflate a standard deviation. Locally it flags all 7 festival rows plus 2 others.
+- Silver keys: ERP codes (`ST-07`, `SKU-00012`) are the conformed keys; POS ids and SaaS store names map onto them through broadcast-joined crosswalks.
+- Dedupe in two steps: exact re-sends (identical values) are dropped before the rules; after the rules, the latest valid version per key wins. Locally: 120 re-sends removed, 0 superseded, and silver sales/snapshots = 9,680 rows = the true row count.
+- Waste is bucketed by store-local event date (585 of 6,545 logs would move week if bucketed in UTC) and by event time, not sync time (68 late-synced logs stay in their week).
+- Value rules only apply when keys are known (`NOT keys_known OR ...`), so an orphan row fails only the key rule and the per-rule counts add up.
